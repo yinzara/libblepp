@@ -30,7 +30,6 @@
 #include <stdexcept>
 #include <cstdint>
 #include <set>
-#include <boost/optional.hpp>
 #include <blepp/blestatemachine.h> //for UUID. FIXME mofo
 #include <bluetooth/hci.h>
 
@@ -78,14 +77,103 @@ namespace BLEPP
 		bool uuid_16_bit_complete=0;
 		bool uuid_32_bit_complete=0;
 		bool uuid_128_bit_complete=0;
-		
-		boost::optional<Name>  local_name;
-		boost::optional<Flags> flags;
+
+		Name*  local_name = nullptr;
+		Flags* flags = nullptr;
 
 		std::vector<std::vector<uint8_t>> manufacturer_specific_data;
 		std::vector<std::vector<uint8_t>> service_data;
 		std::vector<std::vector<uint8_t>> unparsed_data_with_types;
 		std::vector<std::vector<uint8_t>> raw_packet;
+
+		AdvertisingResponse() = default;
+		~AdvertisingResponse() {
+			delete local_name;
+			delete flags;
+		}
+
+		// Copy constructor
+		AdvertisingResponse(const AdvertisingResponse& other)
+			: address(other.address)
+			, type(other.type)
+			, rssi(other.rssi)
+			, UUIDs(other.UUIDs)
+			, uuid_16_bit_complete(other.uuid_16_bit_complete)
+			, uuid_32_bit_complete(other.uuid_32_bit_complete)
+			, uuid_128_bit_complete(other.uuid_128_bit_complete)
+			, local_name(other.local_name ? new Name(*other.local_name) : nullptr)
+			, flags(other.flags ? new Flags(*other.flags) : nullptr)
+			, manufacturer_specific_data(other.manufacturer_specific_data)
+			, service_data(other.service_data)
+			, unparsed_data_with_types(other.unparsed_data_with_types)
+			, raw_packet(other.raw_packet)
+		{}
+
+		// Copy assignment
+		AdvertisingResponse& operator=(const AdvertisingResponse& other) {
+			if (this != &other) {
+				address = other.address;
+				type = other.type;
+				rssi = other.rssi;
+				UUIDs = other.UUIDs;
+				uuid_16_bit_complete = other.uuid_16_bit_complete;
+				uuid_32_bit_complete = other.uuid_32_bit_complete;
+				uuid_128_bit_complete = other.uuid_128_bit_complete;
+				delete local_name;
+				local_name = other.local_name ? new Name(*other.local_name) : nullptr;
+				delete flags;
+				flags = other.flags ? new Flags(*other.flags) : nullptr;
+				manufacturer_specific_data = other.manufacturer_specific_data;
+				service_data = other.service_data;
+				unparsed_data_with_types = other.unparsed_data_with_types;
+				raw_packet = other.raw_packet;
+			}
+			return *this;
+		}
+
+		// Move constructor
+		AdvertisingResponse(AdvertisingResponse&& other) noexcept
+			: address(std::move(other.address))
+			, type(other.type)
+			, rssi(other.rssi)
+			, UUIDs(std::move(other.UUIDs))
+			, uuid_16_bit_complete(other.uuid_16_bit_complete)
+			, uuid_32_bit_complete(other.uuid_32_bit_complete)
+			, uuid_128_bit_complete(other.uuid_128_bit_complete)
+			, local_name(other.local_name)
+			, flags(other.flags)
+			, manufacturer_specific_data(std::move(other.manufacturer_specific_data))
+			, service_data(std::move(other.service_data))
+			, unparsed_data_with_types(std::move(other.unparsed_data_with_types))
+			, raw_packet(std::move(other.raw_packet))
+		{
+			other.local_name = nullptr;
+			other.flags = nullptr;
+		}
+
+		// Move assignment
+		AdvertisingResponse& operator=(AdvertisingResponse&& other) noexcept {
+			if (this != &other) {
+				address = std::move(other.address);
+				type = other.type;
+				rssi = other.rssi;
+				UUIDs = std::move(other.UUIDs);
+				uuid_16_bit_complete = other.uuid_16_bit_complete;
+				uuid_32_bit_complete = other.uuid_32_bit_complete;
+				uuid_128_bit_complete = other.uuid_128_bit_complete;
+				delete local_name;
+				local_name = other.local_name;
+				other.local_name = nullptr;
+				delete flags;
+				flags = other.flags;
+				other.flags = nullptr;
+				manufacturer_specific_data = std::move(other.manufacturer_specific_data);
+				service_data = std::move(other.service_data);
+				unparsed_data_with_types = std::move(other.unparsed_data_with_types);
+				raw_packet = std::move(other.raw_packet);
+			}
+			return *this;
+		}
 	};
 
 	/// Class for scanning for BLE devices

@@ -614,7 +614,7 @@ namespace BLEPP
 
 					if(type == GAP::flags)
 					{
-						rsp.flags = AdvertisingResponse::Flags({chunk.begin(), chunk.end()});
+						rsp.flags = new AdvertisingResponse::Flags({chunk.begin(), chunk.end()});
 
 						LOG(Info, "Flags = " << to_hex(rsp.flags->flag_data));
 
@@ -655,12 +655,12 @@ namespace BLEPP
 					else if(type == GAP::shortened_local_name || type == GAP::complete_local_name)
 					{
 						chunk.pop_front();
-						AdvertisingResponse::Name n;
-						n.complete = type==GAP::complete_local_name;
-						n.name = std::string(chunk.begin(), chunk.end());
+						AdvertisingResponse::Name* n = new AdvertisingResponse::Name();
+						n->complete = type==GAP::complete_local_name;
+						n->name = std::string(chunk.begin(), chunk.end());
 						rsp.local_name = n;
 
-						LOG(Info, "Name (" << (n.complete?"complete":"incomplete") << "): " << n.name);
+						LOG(Info, "Name (" << (n->complete?"complete":"incomplete") << "): " << n->name);
 					}
 					else if(type == GAP::manufacturer_data)
 					{

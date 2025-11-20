@@ -100,10 +100,6 @@ then
 	AC_ERROR([bluez bluetooth missing])
 fi
 
-AC_CHECK_HEADER(boost/optional.hpp,  [ ], [AC_ERROR([boost::optional missing])])
-
-
-
 TEST_AND_SET_CXXFLAG(-fPIC)
 dnl TEST_AND_SET_CXXFLAG(-Werror)
 
