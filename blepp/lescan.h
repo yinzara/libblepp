@@ -30,6 +30,7 @@
 #include <stdexcept>
 #include <cstdint>
 #include <set>
+#include <unistd.h>
 #include <blepp/blestatemachine.h> //for UUID. FIXME mofo
 #include <bluetooth/hci.h>
 
