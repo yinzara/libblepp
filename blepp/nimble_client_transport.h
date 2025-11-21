@@ -33,6 +33,8 @@
 #include <queue>
 #include <set>
 #include <vector>
+#include <thread>
+#include <atomic>
 
 // Forward declare Nimble structures
 struct ble_gap_event;
@@ -69,11 +71,15 @@ namespace BLEPP
 		// Transport information
 		const char* get_transport_name() const override { return "Nimble"; }
 		bool is_available() const override;
+		std::string get_mac_address() const override;
 
 		// Nimble callbacks (static wrappers that call instance methods)
 		static int gap_event_callback(struct ble_gap_event* event, void* arg);
 		static int gatt_event_callback(uint16_t conn_handle, uint16_t attr_handle,
 		                               struct ble_gatt_access_ctxt* ctxt, void* arg);
+
+		// Public for static callback access
+		std::atomic<bool> synchronized_;  // True when Nimble host has synchronized
 
 	private:
 		struct ConnectionInfo {
@@ -97,6 +103,7 @@ namespace BLEPP
 		mutable std::mutex conn_mutex_;  // mutable so get_mtu() can lock in const context
 
 		int next_fd_;  // For generating fake file descriptors
+		mutable std::string mac_address_;  // Cached BLE MAC address (mutable for lazy init in const getter)
 
 		// Nimble initialization
 		int initialize_nimble();

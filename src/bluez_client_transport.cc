@@ -483,6 +483,35 @@ int BlueZClientTransport::set_mtu(int fd, uint16_t mtu)
 	return 0;
 }
 
+// ============================================================================
+// MAC Address Operations
+// ============================================================================
+
+std::string BlueZClientTransport::get_mac_address() const
+{
+	ENTER();
+
+	// Return cached address if available
+	if (!mac_address_.empty()) {
+		return mac_address_;
+	}
+
+	// Read address from HCI device
+	bdaddr_t bdaddr;
+	int rc = hci_devba(hci_dev_id_, &bdaddr);
+	if (rc < 0) {
+		LOG(Error, "Failed to read device address");
+		return "";
+	}
+
+	// Convert bdaddr_t to string (BlueZ format is little-endian)
+	char addr_str[18];
+	ba2str(&bdaddr, addr_str);
+	mac_address_ = addr_str;
+
+	return mac_address_;
+}
+
 } // namespace BLEPP
 
 #endif // BLEPP_BLUEZ_SUPPORT

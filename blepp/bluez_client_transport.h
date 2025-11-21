@@ -61,6 +61,7 @@ namespace BLEPP
 		// Transport information
 		const char* get_transport_name() const override { return "BlueZ"; }
 		bool is_available() const override;
+		std::string get_mac_address() const override;
 
 	private:
 		struct ConnectionInfo {
@@ -76,6 +77,7 @@ namespace BLEPP
 
 		std::set<std::string> seen_devices_;  // For duplicate filtering
 		std::map<int, ConnectionInfo> connections_;
+		mutable std::string mac_address_;  // Cached BLE MAC address
 
 		int open_hci_device();
 		void close_hci_device();

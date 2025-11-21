@@ -51,6 +51,7 @@ endif
 ifdef BLEPP_NIMBLE_SUPPORT
 LIBOBJS+=src/nimble_client_transport.o
 CXXFLAGS+=-DBLEPP_NIMBLE_SUPPORT
+CXXFLAGS+=-DCONFIG_LINUX_BLE_STACK_APP=1
 
 # Find Nimble BLE stack (required for Nimble transport)
 NIMBLE_ROOT ?= $(shell pwd)/../atbm-wifi/ble_host/nimble_v42

@@ -151,6 +151,10 @@ namespace BLEPP
 		/// @return true if transport can be used
 		virtual bool is_available() const = 0;
 
+		/// Get the Bluetooth MAC address used by this transport
+		/// @return MAC address as string in format "XX:XX:XX:XX:XX:XX", or empty string on error
+		virtual std::string get_mac_address() const = 0;
+
 		// ===== Callbacks (optional, for async operation) =====
 
 		std::function<void(const AdvertisementData&)> on_advertisement;

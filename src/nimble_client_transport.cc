@@ -28,6 +28,14 @@
 #include <blepp/lescan.h>
 #include <blepp/logging.h>
 
+#include <cstdlib>
+#include <ctime>
+#include <iomanip>
+#include <cstring>
+#include <unistd.h>
+#include <sys/ioctl.h>
+#include <net/if.h>
+
 // Nimble headers
 extern "C" {
 #include "host/ble_hs.h"
@@ -37,9 +45,21 @@ extern "C" {
 #include "host/ble_hs_mbuf.h"
 #include "nimble/ble.h"
 #include "nimble/nimble_port.h"
+#include "nimble/nimble_npl.h"
 
 // Internal API for sending raw ATT PDUs
 int ble_att_tx(uint16_t conn_handle, struct os_mbuf *txom);
+
+// Global variable used by nimble_port_run() to exit event loop
+extern int nimble_th_exit;
+
+// HCI ioctl transport functions (ATBM-specific)
+int hif_ioctl_init();
+void hif_ioctl_loop();
+
+// Nimble port ATBM OS integration
+void nimble_port_atbmos_init(void(* host_task_fn)(void*));
+void nimble_port_atbmos_free(void);
 }
 
 #include <cstring>
@@ -50,15 +70,53 @@ int ble_att_tx(uint16_t conn_handle, struct os_mbuf *txom);
 namespace BLEPP
 {
 
+// Static pointer to transport instance for callbacks
+static NimbleClientTransport* g_nimble_transport_instance = nullptr;
+
+// Static Nimble host task function
+static void nimble_host_task(void* param)
+{
+	LOG(Info, "Nimble host task thread starting");
+
+	// Run the Nimble event loop - this processes all Nimble stack events
+	nimble_port_run();
+
+	LOG(Info, "Nimble host task thread exiting");
+}
+
 NimbleClientTransport::NimbleClientTransport()
 	: initialized_(false)
+	, synchronized_(false)
 	, scanning_(false)
 	, next_fd_(1000)  // Start with 1000 to avoid conflicts with real FDs
 {
 	LOG(Info, "NimbleClientTransport: Initializing Nimble transport");
 
+	g_nimble_transport_instance = this;
+
 	if (initialize_nimble() == 0) {
 		initialized_ = true;
+
+		// Wait for Nimble host to synchronize (like ATBM lib_ble_main_init does)
+		LOG(Info, "Waiting for Nimble host to synchronize...");
+		LOG(Info, "Initial synchronized_ value: " << synchronized_.load());
+		LOG(Info, "g_nimble_transport_instance: " << (void*)g_nimble_transport_instance);
+		int timeout_ms = 5000;  // 5 second timeout
+		int waited_ms = 0;
+		while (!synchronized_.load() && waited_ms < timeout_ms) {
+			if (waited_ms % 500 == 0) {  // Log every 500ms
+				LOG(Info, "Still waiting for sync... (" << waited_ms << "ms elapsed, synchronized_=" << synchronized_.load() << ")");
+			}
+			usleep(10000);  // Sleep for 10ms
+			waited_ms += 10;
+		}
+
+		if (synchronized_.load()) {
+			LOG(Info, "Nimble host synchronized after " << waited_ms << "ms");
+		} else {
+			LOG(Error, "Nimble host failed to synchronize after " << timeout_ms << "ms");
+			LOG(Error, "Final synchronized_ value: " << synchronized_.load());
+		}
 	}
 }
 
@@ -94,30 +152,120 @@ bool NimbleClientTransport::is_available() const
 // Nimble Initialization
 // ============================================================================
 
+// Static sync callback that sets the BLE address
+static void nimble_sync_callback()
+{
+	LOG(Info, ">>> Nimble sync callback called - host synchronized <<<");
+
+	// Mark as synchronized
+	if (g_nimble_transport_instance) {
+		LOG(Info, "Setting synchronized flag to true");
+		g_nimble_transport_instance->synchronized_ = true;
+	} else {
+		LOG(Error, "g_nimble_transport_instance is NULL in sync callback!");
+	}
+
+	// ATBM hardware doesn't have a factory BLE address, so we need to set one
+	// Try to ensure an address exists first
+	int rc = ble_hs_util_ensure_addr(0);
+	if (rc == BLE_HS_ENOADDR) {
+		// No address available - derive from WiFi MAC address
+		LOG(Warning, "No BLE address found, deriving from WiFi MAC address");
+
+		uint8_t ble_addr[6] = {0};
+		bool mac_found = false;
+
+		// Try to get WiFi MAC address from network interface
+		int sock = socket(AF_INET, SOCK_DGRAM, 0);
+		if (sock >= 0) {
+			struct ifreq ifr;
+			const char* wifi_interfaces[] = {"wlan0", "wlan1", "ath0", "ra0", NULL};
+
+			for (int i = 0; wifi_interfaces[i] != NULL && !mac_found; i++) {
+				memset(&ifr, 0, sizeof(ifr));
+				strncpy(ifr.ifr_name, wifi_interfaces[i], IFNAMSIZ - 1);
+
+				if (ioctl(sock, SIOCGIFHWADDR, &ifr) == 0) {
+					// Successfully got MAC address
+					memcpy(ble_addr, ifr.ifr_hwaddr.sa_data, 6);
+					mac_found = true;
+					LOG(Info, "Using WiFi MAC from " << wifi_interfaces[i]);
+				}
+			}
+			close(sock);
+		}
+
+		if (!mac_found) {
+			// Fallback to random address if WiFi MAC not available
+			LOG(Warning, "WiFi MAC not found, using random address");
+			srand(time(NULL));
+			for (int i = 0; i < 6; i++) {
+				ble_addr[i] = rand() & 0xFF;
+			}
+		}
+
+		// Set top 2 bits to '11' to make it a random static address
+		ble_addr[5] |= 0xC0;
+
+		// Set the BLE address (now in sync callback, controller is ready)
+		rc = ble_hs_id_set_rnd(ble_addr);
+		if (rc != 0) {
+			LOG(Error, "Failed to set BLE address: " << rc);
+			return;
+		}
+
+		LOG(Info, "Set BLE address: " <<
+			std::hex << std::setfill('0') <<
+			std::setw(2) << (int)ble_addr[5] << ":" <<
+			std::setw(2) << (int)ble_addr[4] << ":" <<
+			std::setw(2) << (int)ble_addr[3] << ":" <<
+			std::setw(2) << (int)ble_addr[2] << ":" <<
+			std::setw(2) << (int)ble_addr[1] << ":" <<
+			std::setw(2) << (int)ble_addr[0] << std::dec);
+	} else if (rc != 0) {
+		LOG(Error, "Failed to ensure address: " << rc);
+	} else {
+		LOG(Info, "BLE address already configured");
+	}
+}
+
 int NimbleClientTransport::initialize_nimble()
 {
-	LOG(Info, "NimbleClientTransport: Initializing Nimble BLE stack");
+	LOG(Info, "=== NimbleClientTransport: Initializing Nimble BLE stack ===");
+
+	// Initialize HCI ioctl transport (ATBM-specific)
+	LOG(Info, "Calling hif_ioctl_init()...");
+	int rc = hif_ioctl_init();
+	if (rc != 0) {
+		LOG(Error, "hif_ioctl_init() failed with rc=" << rc);
+		return -1;
+	}
+	LOG(Info, "hif_ioctl_init() completed successfully");
 
 	// Initialize Nimble port
+	LOG(Info, "Calling nimble_port_init()...");
 	nimble_port_init();
+	LOG(Info, "nimble_port_init() completed");
 
-	// Initialize the host
-	ble_hs_cfg.sync_cb = [](void) {
-		LOG(Info, "Nimble host synchronized");
-	};
+	// Set callbacks - address will be set in sync callback
+	LOG(Info, "Setting sync and reset callbacks");
+	ble_hs_cfg.sync_cb = nimble_sync_callback;
 
 	ble_hs_cfg.reset_cb = [](int reason) {
 		LOG(Error, "Nimble host reset, reason=" << reason);
 	};
 
-	// Set device address type to public
-	int rc = ble_hs_util_ensure_addr(0);
-	if (rc != 0) {
-		LOG(Error, "Failed to ensure address: " << rc);
-		return -1;
-	}
+	// Create the Nimble host thread using ATBM's thread management
+	LOG(Info, "Creating Nimble host thread via nimble_port_atbmos_init()...");
+	nimble_port_atbmos_init(nimble_host_task);
+	LOG(Info, "Nimble host thread created");
 
-	LOG(Info, "Nimble BLE stack initialized successfully");
+	// Schedule the BLE host to start - this triggers synchronization
+	LOG(Info, "Calling ble_hs_sched_start()...");
+	ble_hs_sched_start();
+	LOG(Info, "ble_hs_sched_start() completed");
+
+	LOG(Info, "=== Nimble BLE stack initialization complete ===");
 	return 0;
 }
 
@@ -127,13 +275,20 @@ void NimbleClientTransport::shutdown_nimble()
 
 	// Stop scanning if active
 	if (ble_gap_disc_active()) {
+		LOG(Info, "Cancelling active scan...");
 		ble_gap_disc_cancel();
 	}
 
+	// Stop the Nimble host thread using ATBM's cleanup function
+	// This will signal nimble_th_exit=1, post a dummy event, and stop the thread
+	LOG(Info, "Stopping Nimble host thread via nimble_port_atbmos_free()...");
+	nimble_port_atbmos_free();
+	LOG(Info, "Nimble host thread stopped");
+
 	// Release nimble port resources
-	// Note: nimble_port_release() releases event queues and other resources
-	// but doesn't fully deinitialize the stack (no nimble_port_deinit exists)
+	LOG(Info, "Releasing nimble port resources...");
 	nimble_port_release();
+	LOG(Info, "Nimble shutdown complete");
 }
 
 // ============================================================================
@@ -387,7 +542,13 @@ void NimbleClientTransport::handle_notify_rx_event(struct ble_gap_event* event)
 int NimbleClientTransport::start_scan(const ScanParams& params)
 {
 	if (!initialized_) {
+		LOG(Error, "Transport not initialized");
 		return -1;
+	}
+
+	if (!synchronized_) {
+		LOG(Error, "Nimble host not synchronized yet");
+		return -BLE_HS_EDISABLED;
 	}
 
 	if (scanning_) {
@@ -418,9 +579,18 @@ int NimbleClientTransport::start_scan(const ScanParams& params)
 	disc_params.itvl = (params.interval_ms * 1000) / 625;
 	disc_params.window = (params.window_ms * 1000) / 625;
 
+	// Infer the address type to use automatically
+	uint8_t own_addr_type;
+	int rc = ble_hs_id_infer_auto(0, &own_addr_type);
+	if (rc != 0) {
+		LOG(Error, "Failed to infer address type: " << rc);
+		return rc;
+	}
+	LOG(Debug, "Using address type: " << (int)own_addr_type);
+
 	// Start scan
-	int rc = ble_gap_disc(BLE_OWN_ADDR_PUBLIC, BLE_HS_FOREVER, &disc_params,
-	                      gap_event_callback, this);
+	rc = ble_gap_disc(own_addr_type, BLE_HS_FOREVER, &disc_params,
+	                  gap_event_callback, this);
 
 	if (rc != 0) {
 		LOG(Error, "Failed to start scan: " << rc);
@@ -702,6 +872,40 @@ void NimbleClientTransport::string_to_addr(const std::string& str, uint8_t addr[
 			addr[i] = (uint8_t)values[i];
 		}
 	}
+}
+
+// ============================================================================
+// MAC Address Operations
+// ============================================================================
+
+std::string NimbleClientTransport::get_mac_address() const
+{
+	// If cached, return it
+	if (!mac_address_.empty()) {
+		return mac_address_;
+	}
+
+	// Read from Nimble
+	int is_nrpa;
+	uint8_t ble_addr[6];
+	int rc = ble_hs_id_copy_addr(BLE_ADDR_RANDOM, ble_addr, &is_nrpa);
+	if (rc != 0) {
+		LOG(Warning, "Failed to read BLE address: " << rc);
+		return "";
+	}
+
+	// Cache and return
+	std::ostringstream addr_stream;
+	addr_stream << std::hex << std::setfill('0') <<
+		std::setw(2) << (int)ble_addr[5] << ":" <<
+		std::setw(2) << (int)ble_addr[4] << ":" <<
+		std::setw(2) << (int)ble_addr[3] << ":" <<
+		std::setw(2) << (int)ble_addr[2] << ":" <<
+		std::setw(2) << (int)ble_addr[1] << ":" <<
+		std::setw(2) << (int)ble_addr[0];
+	mac_address_ = addr_stream.str();
+
+	return mac_address_;
 }
 
 } // namespace BLEPP
