@@ -101,9 +101,9 @@ endif
 # Core examples that work with any transport
 PROGS=examples/lescan_transport
 
-# BlueZ-specific examples (use HCIScanner and BLEGATTStateMachine::connect_blocking)
+# BlueZ-specific examples (use BLEGATTStateMachine::connect_blocking)
 ifdef BLEPP_BLUEZ_SUPPORT
-PROGS+=examples/lescan examples/blelogger examples/bluetooth examples/lescan_simple examples/temperature examples/read_device_name examples/write
+PROGS+=examples/lescan_simple examples/blelogger examples/bluetooth examples/temperature examples/read_device_name examples/write
 endif
 
 .PHONY: all clean testclean install lib progs test doc install-so install-a install-hdr install-pkgconfig

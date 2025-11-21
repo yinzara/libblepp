@@ -204,133 +204,58 @@ namespace BLEPP
 	/// @throws HCIParseError if packet is malformed
 	std::vector<AdvertisingResponse> parse_advertisement_packet(const std::vector<uint8_t>& p);
 
-	/// Class for scanning for BLE devices
-	/// this must be run as root, because it requires getting packets from the HCI.
-	/// The HCI requires root since it has no permissions on setting filters, so
-	/// anyone with an open HCI device can sniff all data.
-	class HCIScanner
+	// Forward declaration
+	class BLEClientTransport;
+
+	/// Transport-agnostic BLE Scanner class
+	/// Works with any BLEClientTransport implementation (BlueZ, Nimble, etc.)
+	/// This is the recommended scanner class for new code.
+	class BLEScanner
 	{
-		class FD
-		{
-			private:
-				int fd=-1;
-
-			public:
-				operator int () const
-				{
-					return fd;
-				}
-				FD(int i)
-				:fd(i)
-				{
-				}
-				
-				FD()=default;
-				void set(int i)
-				{
-					fd = i;
-				}
-
-				~FD()
-				{
-					if(fd != -1)
-						close(fd);
-				}
-		};
-
-
-		public:
-		
-		enum class ScanType
-		{
-			Passive  = 0x00,
-			Active   = 0x01,
-		};
-
+	public:
 		enum class FilterDuplicates
 		{
-			Off, //Get all events
-			Hardware, //Rely on hardware filtering only. Lower power draw, but can actually send
-			          //duplicates if the device's builtin list gets overwhelmed.
-			Software, //Get all events from the device and filter them by hand.
-			Both      //The best and worst of both worlds. 
+			Off,      // Get all advertisement events
+			Software  // Filter duplicates in software
 		};
 
-		///Generic error exception class
-		class Error: public std::runtime_error
-		{
-			public:
-				Error(const std::string& why);
-		};
+		/// Constructor
+		/// @param transport Pointer to transport implementation (must outlive scanner)
+		/// @param filter_duplicates Whether to filter duplicate advertisements
+		explicit BLEScanner(BLEClientTransport* transport, FilterDuplicates filter = FilterDuplicates::Software);
 
-		///Thrown only if a read() is interrupted. Only bother 
-		///handling if you've got a non terminating exception handler
-		class Interrupted: public Error
-		{
-			using Error::Error;
-		};
-		
+		~BLEScanner();
 
-		///IO error of some sort. Probably fatal for any bluetooth
-		///based system. Or might be that the dongle was unplugged.
-		class IOError: public Error
-		{
-			public:
-			IOError(const std::string& why, int errno_val);
-		};
-		
-		///HCI device spat out invalid data.
-		///This is not good. Almost certainly fatal.
-		class HCIError: public Error
-		{
-			using Error::Error;
-		};
+		/// Start scanning for BLE devices
+		/// @param passive If true, use passive scanning (lower power)
+		void start(bool passive = false);
 
-		HCIScanner();
-		HCIScanner(bool start);
-		HCIScanner(bool start, FilterDuplicates duplicates, ScanType, std::string device="");
-
-
-		void start();
+		/// Stop scanning
 		void stop();
-		
-		///get the file descriptor.
-		///Use with select(), poll() or whatever.
-		int get_fd() const;
-		
-		~HCIScanner();
 
-		///Blocking call. Use select() on the FD if you don't want to block.
-		///This reads and parses the HCI packets.
-		std::vector<AdvertisingResponse> get_advertisements();
-		
-		///Parse an HCI advertising packet. There's probably not much
-		///reason to call this yourself.
-		static std::vector<AdvertisingResponse> parse_packet(const std::vector<uint8_t>& p);
+		/// Get advertisements (blocking call)
+		/// @param timeout_ms Timeout in milliseconds (0 = no timeout)
+		/// @return Vector of advertising responses
+		std::vector<AdvertisingResponse> get_advertisements(int timeout_ms = 0);
 
-		private:
-			struct FilterEntry
-			{
-				explicit FilterEntry(const AdvertisingResponse&);
-				const std::string mac_address;
-				int type;
-				bool operator<(const FilterEntry&) const;
-			};
+		/// Check if scanner is running
+		bool is_running() const { return running_; }
 
-			bool hardware_filtering;
-			bool software_filtering;
-			ScanType scan_type;
+	private:
+		struct FilterEntry
+		{
+			explicit FilterEntry(const AdvertisingResponse&);
+			const std::string mac_address;
+			int type;
+			bool operator<(const FilterEntry&) const;
+		};
 
-			FD hci_fd;
-			bool running=0;
-#ifdef BLEPP_BLUEZ_SUPPORT
-			hci_filter old_filter;
-#endif
-			
-			///Read the HCI data, but don't parse it.
-			std::vector<uint8_t> read_with_retry();
-			std::set<FilterEntry> scanned_devices;
+		BLEClientTransport* transport_;
+		bool running_;
+		bool software_filtering_;
+		std::set<FilterEntry> scanned_devices_;
 	};
+
 }
 
 #endif

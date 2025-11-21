@@ -143,6 +143,23 @@ namespace BLEPP
 		std::function<void(uint16_t conn_handle, uint16_t mtu)> on_mtu_changed;
 	};
 
+	/// Factory function to create appropriate server transport based on build configuration
+	/// Tries BlueZ first (if available), then Nimble
+	/// @return Pointer to transport implementation (caller owns), nullptr if none available
+	BLETransport* create_server_transport();
+
+#ifdef BLEPP_BLUEZ_SUPPORT
+	/// Create BlueZ server transport explicitly
+	/// @return Pointer to BlueZ transport implementation (caller owns)
+	BLETransport* create_bluez_server_transport();
+#endif
+
+#ifdef BLEPP_NIMBLE_SUPPORT
+	/// Create Nimble server transport explicitly
+	/// @return Pointer to Nimble transport implementation (caller owns)
+	BLETransport* create_nimble_server_transport();
+#endif
+
 } // namespace BLEPP
 
 #endif // BLEPP_SERVER_SUPPORT

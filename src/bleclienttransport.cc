@@ -23,12 +23,22 @@
 #include <blepp/bleclienttransport.h>
 #include <blepp/logging.h>
 
+#ifdef BLEPP_SERVER_SUPPORT
+#include <blepp/bletransport.h>
+#endif
+
 #ifdef BLEPP_BLUEZ_SUPPORT
 #include <blepp/bluez_client_transport.h>
+#ifdef BLEPP_SERVER_SUPPORT
+#include <blepp/bluez_transport.h>
+#endif
 #endif
 
 #ifdef BLEPP_NIMBLE_SUPPORT
 #include <blepp/nimble_client_transport.h>
+#ifdef BLEPP_SERVER_SUPPORT
+#include <blepp/nimble_transport.h>
+#endif
 #endif
 
 namespace BLEPP
@@ -84,5 +94,66 @@ BLEClientTransport* create_nimble_client_transport()
 	return new NimbleClientTransport();
 }
 #endif
+
+// ===================================================================
+// Server Transport Factory Functions
+// ===================================================================
+
+#ifdef BLEPP_SERVER_SUPPORT
+
+BLETransport* create_server_transport()
+{
+	ENTER();
+
+	// Prefer BlueZ if available and working, fall back to Nimble
+#ifdef BLEPP_BLUEZ_SUPPORT
+	{
+		BlueZTransport* transport = new BlueZTransport();
+		// BlueZ server doesn't have is_available(), so just check if it was created
+		if (transport) {
+			LOG(Info, "Using BlueZ server transport");
+			return transport;
+		}
+		delete transport;
+		LOG(Warning, "BlueZ server transport not available");
+	}
+#endif
+
+#ifdef BLEPP_NIMBLE_SUPPORT
+	{
+		NimbleTransport* transport = new NimbleTransport();
+		// Nimble server doesn't have is_available() either
+		if (transport) {
+			LOG(Info, "Using Nimble server transport");
+			return transport;
+		}
+		delete transport;
+		LOG(Warning, "Nimble server transport not available");
+	}
+#endif
+
+	LOG(Error, "No BLE server transport available");
+	return nullptr;
+}
+
+#ifdef BLEPP_BLUEZ_SUPPORT
+BLETransport* create_bluez_server_transport()
+{
+	ENTER();
+	LOG(Info, "Creating BlueZ server transport");
+	return new BlueZTransport();
+}
+#endif
+
+#ifdef BLEPP_NIMBLE_SUPPORT
+BLETransport* create_nimble_server_transport()
+{
+	ENTER();
+	LOG(Info, "Creating Nimble server transport");
+	return new NimbleTransport();
+}
+#endif
+
+#endif // BLEPP_SERVER_SUPPORT
 
 } // namespace BLEPP
