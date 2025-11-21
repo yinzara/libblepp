@@ -493,12 +493,4 @@ namespace BLEPP
 		return ret;
 	}
 
-#ifdef BLEPP_BLUEZ_SUPPORT
-	// Compatibility wrapper - HCIScanner::parse_packet calls the standalone function
-	std::vector<AdvertisingResponse> HCIScanner::parse_packet(const std::vector<uint8_t>& p)
-	{
-		return parse_advertisement_packet(p);
-	}
-#endif
-
 } // namespace BLEPP

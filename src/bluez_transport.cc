@@ -411,12 +411,11 @@ int BlueZTransport::accept_l2cap_connection()
 
 	// Notify callback
 	if (on_connected) {
-		ConnectionParams params = {
-			.conn_handle = conn_handle,
-			.peer_address = peer_addr,
-			.peer_address_type = addr.l2_bdaddr_type,
-			.mtu = 23
-		};
+		ConnectionParams params;
+		params.conn_handle = conn_handle;
+		params.peer_address = peer_addr;
+		params.peer_address_type = addr.l2_bdaddr_type;
+		params.mtu = 23;
 		on_connected(params);
 	}
 
