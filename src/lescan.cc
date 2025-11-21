@@ -2,11 +2,24 @@
 #include "blepp/pretty_printers.h"
 #include "blepp/gap.h"
 
-#include <bluetooth/hci_lib.h>
 #include <string>
 #include <cstring>
 #include <cerrno>
 #include <iomanip>
+
+#ifdef BLEPP_BLUEZ_SUPPORT
+#include <bluetooth/hci_lib.h>
+#endif
+
+// HCI packet types (standard Bluetooth HCI constants)
+#ifndef HCI_EVENT_PKT
+#define HCI_EVENT_PKT 0x04
+#endif
+
+// HCI event codes (standard Bluetooth HCI constants)
+#ifndef EVT_LE_META_EVENT
+#define EVT_LE_META_EVENT 0x3E
+#endif
 
 namespace BLEPP
 {
@@ -97,10 +110,18 @@ namespace BLEPP
 		return to_hex(s.data(), s.size());
 	}
 
+	// HCI Scanner error implementation - always available
+	HCIScannerError::HCIScannerError(const std::string& why)
+	:std::runtime_error(why)
+	{
+		LOG(LogLevels::Error, why);
+	}
+
+#ifdef BLEPP_BLUEZ_SUPPORT
 	HCIScanner::Error::Error(const std::string& why)
 	:std::runtime_error(why)
-	{	
-		LOG(LogLevels::Error, why);	
+	{
+		LOG(LogLevels::Error, why);
 	}
 
 	HCIScanner::IOError::IOError(const std::string& why, int errno_val)
@@ -452,11 +473,20 @@ namespace BLEPP
 
 	*/
 
+
+#endif // BLEPP_BLUEZ_SUPPORT
+
+	// Advertisement packet parsing - available for all transports
+	// These functions parse HCI advertisement packets and are used by both
+	// BlueZ (HCIScanner) and Nimble transports
+
+	// Forward declarations for internal parsing functions
 	std::vector<AdvertisingResponse> parse_event_packet(Span packet);
 	std::vector<AdvertisingResponse> parse_le_meta_event(Span packet);
 	std::vector<AdvertisingResponse> parse_le_meta_event_advertisement(Span packet);
 
-	std::vector<AdvertisingResponse> HCIScanner::parse_packet(const std::vector<uint8_t>& p)
+	// Standalone function
+	std::vector<AdvertisingResponse> parse_advertisement_packet(const std::vector<uint8_t>& p)
 	{
 		Span  packet(p);
 		LOG(Debug, to_hex(p));
@@ -478,22 +508,22 @@ namespace BLEPP
 		else
 		{
 			LOG(LogLevels::Error, "Unknown HCI packet received");
-			throw HCIError("Unknown HCI packet received");
+			throw HCIParseError("Unknown HCI packet received");
 		}
 	}
 
 	std::vector<AdvertisingResponse> parse_event_packet(Span packet)
 	{
 		if(packet.size() < 2)
-			throw HCIScanner::HCIError("Truncated event packet");
-		
+			throw HCIParseError("Truncated event packet");
+
 		uint8_t event_code = packet.pop_front();
 		uint8_t length = packet.pop_front();
 
-		
+
 		if(packet.size() != length)
-			throw HCIScanner::HCIError("Bad packet length");
-		
+			throw HCIParseError("Bad packet length");
+
 		if(event_code == EVT_LE_META_EVENT)
 		{
 			LOG(Info, "event_code = 0x" << std::hex << (int)event_code << ": Meta event" << std::dec);
@@ -505,7 +535,7 @@ namespace BLEPP
 		{
 			LOG(Info, "event_code = 0x" << std::hex << (int)event_code << std::dec);
 			LOGVAR(Info, length);
-			throw HCIScanner::HCIError("Unexpected HCI event packet");
+			throw HCIParseError("Unexpected HCI event packet");
 		}
 	}
 
@@ -698,5 +728,12 @@ namespace BLEPP
 		return ret;
 	}
 
+#ifdef BLEPP_BLUEZ_SUPPORT
+	// Compatibility wrapper - HCIScanner::parse_packet calls the standalone function
+	std::vector<AdvertisingResponse> HCIScanner::parse_packet(const std::vector<uint8_t>& p)
+	{
+		return parse_advertisement_packet(p);
+	}
+#endif
 
-}
+} // namespace BLEPP

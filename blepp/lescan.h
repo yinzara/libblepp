@@ -32,7 +32,10 @@
 #include <set>
 #include <unistd.h>
 #include <blepp/blestatemachine.h> //for UUID. FIXME mofo
+
+#ifdef BLEPP_BLUEZ_SUPPORT
 #include <bluetooth/hci.h>
+#endif
 
 namespace BLEPP
 {
@@ -177,9 +180,33 @@ namespace BLEPP
 		}
 	};
 
+	// HCI/BLE Scanner error classes - available for all transports
+
+	/// Generic HCI scanner error exception class
+	class HCIScannerError: public std::runtime_error
+	{
+		public:
+			HCIScannerError(const std::string& why);
+	};
+
+	/// HCI device spat out invalid data during parsing
+	class HCIParseError: public HCIScannerError
+	{
+		public:
+			using HCIScannerError::HCIScannerError;
+	};
+
+	/// Parse HCI advertising packet data
+	/// This is a standalone function available regardless of transport backend
+	/// It's also accessible via HCIScanner::parse_packet() for compatibility
+	/// @param p Raw HCI packet data
+	/// @return Vector of parsed advertising responses
+	/// @throws HCIParseError if packet is malformed
+	std::vector<AdvertisingResponse> parse_advertisement_packet(const std::vector<uint8_t>& p);
+
 	/// Class for scanning for BLE devices
 	/// this must be run as root, because it requires getting packets from the HCI.
-	/// The HCI requires root since it has no permissions on setting filters, so 
+	/// The HCI requires root since it has no permissions on setting filters, so
 	/// anyone with an open HCI device can sniff all data.
 	class HCIScanner
 	{
@@ -296,7 +323,9 @@ namespace BLEPP
 
 			FD hci_fd;
 			bool running=0;
+#ifdef BLEPP_BLUEZ_SUPPORT
 			hci_filter old_filter;
+#endif
 			
 			///Read the HCI data, but don't parse it.
 			std::vector<uint8_t> read_with_retry();
