@@ -148,6 +148,7 @@ if(WITH_NIMBLE_SUPPORT)
 
     # Add Nimble include directories
     include_directories(
+        ${NIMBLE_ROOT}/include
         ${NIMBLE_ROOT}/nimble/include
         ${NIMBLE_ROOT}/nimble/host/include
         ${NIMBLE_ROOT}/nimble/host/services/gap/include
