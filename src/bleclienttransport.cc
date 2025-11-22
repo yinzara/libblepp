@@ -47,23 +47,30 @@ namespace BLEPP
 BLEClientTransport* create_client_transport()
 {
 	ENTER();
+	LOG(Info, "create_client_transport() called - selecting BLE client transport");
 
 	// Prefer BlueZ if available and working, fall back to Nimble
 #ifdef BLEPP_BLUEZ_SUPPORT
 	{
+		LOG(Debug, "Trying BlueZ client transport...");
 		BlueZClientTransport* transport = new BlueZClientTransport();
+		LOG(Debug, "BlueZ client transport created, checking availability...");
 		if (transport->is_available()) {
 			LOG(Info, "Using BlueZ client transport");
 			return transport;
 		}
 		delete transport;
-		LOG(Warning, "BlueZ transport not available");
+		LOG(Warning, "BlueZ transport not available, trying next option");
 	}
+#else
+	LOG(Debug, "BlueZ support not compiled in (BLEPP_BLUEZ_SUPPORT not defined)");
 #endif
 
 #ifdef BLEPP_NIMBLE_SUPPORT
 	{
+		LOG(Debug, "Trying Nimble client transport...");
 		NimbleClientTransport* transport = new NimbleClientTransport();
+		LOG(Debug, "Nimble client transport created, checking availability...");
 		if (transport->is_available()) {
 			LOG(Info, "Using Nimble client transport");
 			return transport;
@@ -71,9 +78,11 @@ BLEClientTransport* create_client_transport()
 		delete transport;
 		LOG(Warning, "Nimble transport not available");
 	}
+#else
+	LOG(Debug, "Nimble support not compiled in (BLEPP_NIMBLE_SUPPORT not defined)");
 #endif
 
-	LOG(Error, "No BLE client transport available");
+	LOG(Error, "No BLE client transport available - all transports failed");
 	return nullptr;
 }
 

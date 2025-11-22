@@ -39,6 +39,9 @@
 #include <fcntl.h>
 #include <cerrno>
 #include <cstring>
+#include <chrono>
+#include <iomanip>
+#include <algorithm>
 
 namespace BLEPP
 {
@@ -72,17 +75,52 @@ BlueZClientTransport::~BlueZClientTransport()
 
 bool BlueZClientTransport::is_available() const
 {
+	LOG(Debug, "BlueZClientTransport::is_available() - checking availability");
+
 	// Check if we can open HCI device
 	int dev_id = hci_get_route(nullptr);
+	LOG(Debug, "hci_get_route(nullptr) returned: " << dev_id);
+
 	if (dev_id < 0) {
-		return false;
+		LOG(Debug, "hci_get_route failed with errno=" << errno << " (" << strerror(errno) << "), trying device 0");
+		dev_id = 0;
 	}
 
+	// Try to bring up the device
+	int ctl = socket(AF_BLUETOOTH, SOCK_RAW, BTPROTO_HCI);
+	if (ctl < 0) {
+		LOG(Error, "Failed to create HCI socket for HCIDEVUP: " << strerror(errno));
+	} else {
+		LOG(Debug, "Created HCI control socket, attempting HCIDEVUP on device " << dev_id);
+		if (ioctl(ctl, HCIDEVUP, dev_id) < 0) {
+			if (errno == EALREADY) {
+				LOG(Debug, "Device hci" << dev_id << " already up");
+			} else {
+				LOG(Warning, "HCIDEVUP failed for hci" << dev_id << ": " << strerror(errno));
+			}
+		} else {
+			LOG(Info, "Successfully brought up hci" << dev_id);
+		}
+		close(ctl);
+
+		// After bringing up the device, get the route again to confirm it's available
+		LOG(Debug, "Re-checking hci_get_route() after HCIDEVUP...");
+		int new_dev_id = hci_get_route(nullptr);
+		if (new_dev_id >= 0) {
+			dev_id = new_dev_id;
+			LOG(Debug, "hci_get_route() now returns: " << dev_id);
+		}
+	}
+
+	// Try to open the device
+	LOG(Debug, "Attempting to open HCI device " << dev_id);
 	int fd = hci_open_dev(dev_id);
 	if (fd < 0) {
+		LOG(Error, "hci_open_dev(" << dev_id << ") failed: " << strerror(errno));
 		return false;
 	}
 
+	LOG(Info, "BlueZ transport is available (hci" << dev_id << ")");
 	close(fd);
 	return true;
 }
@@ -95,16 +133,56 @@ int BlueZClientTransport::open_hci_device()
 		return 0;  // Already open
 	}
 
+	// Get HCI device ID
 	hci_dev_id_ = hci_get_route(nullptr);
 	if (hci_dev_id_ < 0) {
-		LOG(Error, "No Bluetooth adapter found");
+		// hci_get_route failed - try device 0 directly
+		LOG(Debug, "hci_get_route failed, trying hci0 directly");
+		hci_dev_id_ = 0;
+	}
+
+	// Bring up the HCI device if it's down
+	// This is equivalent to "hciconfig hci0 up"
+	int ctl = socket(AF_BLUETOOTH, SOCK_RAW, BTPROTO_HCI);
+	if (ctl >= 0) {
+		if (ioctl(ctl, HCIDEVUP, hci_dev_id_) < 0) {
+			if (errno != EALREADY) {
+				LOG(Warning, "Failed to bring up HCI device " << hci_dev_id_
+				          << ": " << strerror(errno));
+			}
+		} else {
+			LOG(Info, "Brought up HCI device " << hci_dev_id_);
+		}
+		close(ctl);
+
+		// After bringing up the device, get the route again to confirm it's available
+		int new_dev_id = hci_get_route(nullptr);
+		if (new_dev_id >= 0) {
+			hci_dev_id_ = new_dev_id;
+			LOG(Debug, "hci_get_route() now returns: " << hci_dev_id_);
+		}
+	}
+
+	// Now try to open the device
+	hci_fd_ = hci_open_dev(hci_dev_id_);
+	if (hci_fd_ < 0) {
+		LOG(Error, "Failed to open HCI device " << hci_dev_id_
+		          << ": " << strerror(errno));
 		return -1;
 	}
 
-	hci_fd_ = hci_open_dev(hci_dev_id_);
-	if (hci_fd_ < 0) {
-		LOG(Error, "Failed to open HCI device: " << strerror(errno));
-		return -1;
+	// Set up HCI filter to receive LE meta events
+	struct hci_filter flt;
+	hci_filter_clear(&flt);
+	hci_filter_set_ptype(HCI_EVENT_PKT, &flt);
+	hci_filter_set_event(EVT_LE_META_EVENT, &flt);
+	hci_filter_set_event(EVT_CMD_COMPLETE, &flt);
+	hci_filter_set_event(EVT_CMD_STATUS, &flt);
+
+	if (setsockopt(hci_fd_, SOL_HCI, HCI_FILTER, &flt, sizeof(flt)) < 0) {
+		LOG(Warning, "Failed to set HCI filter: " << strerror(errno));
+	} else {
+		LOG(Debug, "HCI filter set to receive LE meta events");
 	}
 
 	LOG(Debug, "Opened HCI device " << hci_dev_id_ << " (fd=" << hci_fd_ << ")");
@@ -125,32 +203,43 @@ void BlueZClientTransport::close_hci_device()
 int BlueZClientTransport::start_scan(const ScanParams& params)
 {
 	ENTER();
+	LOG(Info, "start_scan() called");
 
 	if (scanning_) {
 		LOG(Warning, "Already scanning");
 		return 0;
 	}
 
+	LOG(Debug, "Opening HCI device for scanning...");
 	if (open_hci_device() < 0) {
+		LOG(Error, "Failed to open HCI device");
 		return -1;
 	}
 
 	scan_params_ = params;
+	LOG(Debug, "Scan params: type=" << (int)params.scan_type
+	          << " interval=" << params.interval_ms << "ms"
+	          << " window=" << params.window_ms << "ms"
+	          << " filter_duplicates=" << params.filter_duplicates);
 
 	// Set scan parameters
+	LOG(Debug, "Setting scan parameters...");
 	if (set_scan_parameters(params) < 0) {
+		LOG(Error, "Failed to set scan parameters");
 		return -1;
 	}
 
 	// Enable scanning
+	LOG(Debug, "Enabling scanning...");
 	if (set_scan_enable(true, params.filter_duplicates) < 0) {
+		LOG(Error, "Failed to enable scanning");
 		return -1;
 	}
 
 	scanning_ = true;
 	seen_devices_.clear();
 
-	LOG(Info, "BLE scanning started");
+	LOG(Info, "BLE scanning started successfully on hci" << hci_dev_id_ << " (fd=" << hci_fd_ << ")");
 	return 0;
 }
 
@@ -167,7 +256,8 @@ int BlueZClientTransport::stop_scan()
 	}
 
 	scanning_ = false;
-	LOG(Info, "BLE scanning stopped");
+	close_hci_device();
+	LOG(Info, "BLE scanning stopped and HCI device closed");
 	return 0;
 }
 
@@ -211,9 +301,19 @@ int BlueZClientTransport::set_scan_enable(bool enable, bool filter_duplicates)
 int BlueZClientTransport::get_advertisements(std::vector<AdvertisementData>& ads, int timeout_ms)
 {
 	ENTER();
+	static int call_count = 0;
+	static auto last_log = std::chrono::steady_clock::now();
+	call_count++;
+
+	// Log every 30 seconds
+	auto now = std::chrono::steady_clock::now();
+	if (std::chrono::duration_cast<std::chrono::seconds>(now - last_log).count() >= 30) {
+		LOG(Debug, "Scanner status: " << call_count << " polls, scanning=" << scanning_);
+		last_log = now;
+	}
 
 	if (!scanning_) {
-		LOG(Error, "Not scanning");
+		LOG(Error, "Not scanning - scan state is false!");
 		return -1;
 	}
 
@@ -224,6 +324,11 @@ int BlueZClientTransport::get_advertisements(std::vector<AdvertisementData>& ads
 int BlueZClientTransport::read_hci_events(std::vector<AdvertisementData>& ads, int timeout_ms)
 {
 	ENTER();
+	static int select_count = 0;
+	static int event_count = 0;
+	static int ad_count = 0;
+
+	select_count++;
 
 	fd_set rfds;
 	struct timeval tv;
@@ -245,7 +350,7 @@ int BlueZClientTransport::read_hci_events(std::vector<AdvertisementData>& ads, i
 	}
 
 	if (ret == 0) {
-		// Timeout
+		// Timeout - no events available
 		return 0;
 	}
 
@@ -258,30 +363,58 @@ int BlueZClientTransport::read_hci_events(std::vector<AdvertisementData>& ads, i
 		return -1;
 	}
 
-	if (len < HCI_EVENT_HDR_SIZE) {
+	event_count++;
+
+	// The first byte is the HCI packet type (0x04 = HCI_EVENT_PKT)
+	// Skip it and parse the actual event starting at buf[1]
+	if (len < 1 + HCI_EVENT_HDR_SIZE) {
+		LOG(Warning, "Packet too short: " << len << " bytes");
 		return 0;
 	}
 
-	// Parse HCI event
-	hci_event_hdr* hdr = (hci_event_hdr*)buf;
+	// Parse HCI event (skip the packet type byte)
+	hci_event_hdr* hdr = (hci_event_hdr*)(buf + 1);
+	len -= 1;  // Adjust length to account for skipped packet type byte
+
+	// Log occasionally for debugging
+	if (event_count % 1000 == 1) {
+		LOG(Debug, "HCI event stats: " << event_count << " events, "
+		          << ad_count << " advertisements received");
+	}
 
 	if (hdr->evt != EVT_LE_META_EVENT) {
+		// Not an LE meta event
 		return 0;
 	}
 
 	// Parse LE meta event
-	return parse_advertising_report(buf + HCI_EVENT_HDR_SIZE + 1,
-	                                len - HCI_EVENT_HDR_SIZE - 1, ads);
+	// buf now points to: [Event Code][Param Len][Subevent Code][Data...]
+	// hdr = (hci_event_hdr*)(buf + 1), so:
+	//   hdr->evt = buf[1] = Event Code (0x3e)
+	//   hdr->plen = buf[2] = Param Length
+	// Subevent starts at buf[1] + sizeof(hci_event_hdr) = buf[1] + 2 = buf[3]
+	// So we need: buf + 1 + 2 for the subevent data
+	int num_ads = parse_advertising_report(buf + 3,  // Skip: pkt_type(1) + evt(1) + plen(1)
+	                                       len - 2, ads);  // Adjust length
+	if (num_ads > 0) {
+		ad_count += num_ads;
+		LOG(Debug, "Received " << num_ads << " advertisement(s), total=" << ad_count);
+	}
+	return num_ads;
 }
 
 int BlueZClientTransport::parse_advertising_report(const uint8_t* data, size_t len,
                                                    std::vector<AdvertisementData>& ads)
 {
-	if (len < 1) return 0;
+	if (len < 1) {
+		LOG(Warning, "parse_advertising_report: packet too short: " << len << " bytes");
+		return 0;
+	}
 
 	uint8_t subevent = data[0];
 
 	if (subevent != EVT_LE_ADVERTISING_REPORT) {
+		LOG(Debug, "Ignoring non-advertising LE subevent: 0x" << std::hex << (int)subevent << std::dec);
 		return 0;
 	}
 

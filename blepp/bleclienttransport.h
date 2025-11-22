@@ -44,8 +44,8 @@ namespace BLEPP
 		};
 
 		ScanType scan_type = ScanType::Active;
-		uint16_t interval_ms = 10;      // Scan interval in ms
-		uint16_t window_ms = 10;        // Scan window in ms
+		uint16_t interval_ms = 1280;    // Scan interval in ms (default: 1280ms for WiFi coexistence)
+		uint16_t window_ms = 26;        // Scan window in ms (default: 2% duty cycle)
 		FilterPolicy filter_policy = FilterPolicy::All;
 		bool filter_duplicates = true;  // Filter duplicate advertisements
 	};

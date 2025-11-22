@@ -169,8 +169,8 @@ namespace BLEPP
 		// Configure scan parameters
 		ScanParams params;
 		params.scan_type = passive ? ScanParams::ScanType::Passive : ScanParams::ScanType::Active;
-		params.interval_ms = 16;  // 16ms
-		params.window_ms = 16;
+		params.interval_ms = 1280;  // 1280ms for WiFi coexistence
+		params.window_ms = 26;      // 2% duty cycle (~25.6ms)
 		params.filter_duplicates = !software_filtering_;  // Hardware filtering if not software filtering
 
 		int result = transport_->start_scan(params);
