@@ -64,18 +64,27 @@ sudo make install
 ### Basic Scanning Example
 ```cpp
 #include <blepp/lescan.h>
+#include <blepp/bleclienttransport.h>
 
 int main() {
-    BLEPP::HCIScanner scanner;
+    BLEPP::log_level = BLEPP::LogLevels::Info;
 
-    scanner.on_device_found = [](const BLEPP::AdvertisementData& ad) {
-        std::cout << "Device: " << ad.address
-                  << " RSSI: " << (int)ad.rssi << std::endl;
-    };
+    // Create transport (auto-selects available transport)
+    BLEPP::BLEClientTransport* transport = BLEPP::create_client_transport();
+    if (!transport) {
+        return 1;
+    }
 
+    // Create scanner
+    BLEPP::BLEScanner scanner(transport);
     scanner.start();
-    // Process events...
-    scanner.stop();
+
+    while (1) {
+        std::vector<BLEPP::AdvertisingResponse> ads = scanner.get_advertisements();
+        // Process advertisements...
+    }
+
+    delete transport;
 }
 ```
 
@@ -110,7 +119,7 @@ int main() {
 |--------|---------|-------------|
 | `WITH_SERVER_SUPPORT` | `OFF` | Enable BLE peripheral/server mode |
 | `WITH_BLUEZ_SUPPORT` | `ON` | Enable BlueZ HCI/L2CAP transport |
-| `WITH_NIMBLE_SUPPORT` | `OFF` | Enable ATBM ioctl transport |
+| `WITH_NIMBLE_SUPPORT` | `OFF` | Enable ATBM/NimBLE ioctl transport |
 | `WITH_EXAMPLES` | `OFF` | Build example programs |
 
 ### Build Configuration Examples
@@ -149,7 +158,7 @@ make
 make BLEPP_SERVER_SUPPORT=1
 
 # Client + Server + ATBM
-make BLEPP_SERVER_SUPPORT=1 BLEPP_ATBM_SUPPORT=1 BLEPP_BLUEZ_SUPPORT=1
+make BLEPP_SERVER_SUPPORT=1 BLEPP_NIMBLE_SUPPORT=1 BLEPP_BLUEZ_SUPPORT=1
 ```
 
 See [BUILD_OPTIONS.md](docs/BUILD_OPTIONS.md) for complete build configuration reference.
@@ -158,10 +167,18 @@ See [BUILD_OPTIONS.md](docs/BUILD_OPTIONS.md) for complete build configuration r
 
 Located in the `examples/` directory:
 
-- **lescan_simple** - Minimal BLE scanning example (2 lines of BLE code)
-- **lescan** - Production-ready scanner with signal handling and cleanup
-- **temperature** - Read temperature from standard temperature characteristic
-- **gatt_server** - Simple GATT server implementation *(requires server support)*
+**Client/Central Examples:**
+- **lescan_simple** - Minimal BLE scanning example using transport abstraction
+- **lescan** - Full-featured scanner with BlueZ HCI (signal handling, duplicate filtering)
+- **lescan_transport** - Scanner using transport abstraction layer
+- **temperature** - Read and log temperature characteristic with notifications
+- **read_device_name** - Simple example reading device name characteristic
+- **write** - Write to a characteristic (demonstrates write operations)
+- **bluetooth** - Comprehensive example with notifications, plotting, and non-blocking I/O
+- **blelogger** - Data logging from custom BLE device
+
+**Server/Peripheral Examples:**
+- **gatt_server** - Complete GATT server with Battery Service, Device Info, and custom services *(requires server support)*
 
 Build examples with CMake:
 ```bash
@@ -170,7 +187,25 @@ cmake -DWITH_EXAMPLES=ON ..
 make
 ```
 
+Build with server support:
+```bash
+cmake -DWITH_SERVER_SUPPORT=ON -DWITH_EXAMPLES=ON ..
+make
+```
+
 Examples will be in `build/examples/`.
+
+Run examples (most require root for BLE access):
+```bash
+# Scan for devices
+sudo ./examples/lescan
+
+# Connect and read device name
+sudo ./examples/read_device_name AA:BB:CC:DD:EE:FF
+
+# Run GATT server
+sudo ./examples/gatt_server "My BLE Device"
+```
 
 ## Documentation
 
@@ -178,7 +213,6 @@ Examples will be in `build/examples/`.
 - [CMAKE_BUILD_GUIDE.md](docs/CMAKE_BUILD_GUIDE.md) - CMake build system guide
 - [CLIENT_TRANSPORT_ABSTRACTION.md](docs/CLIENT_TRANSPORT_ABSTRACTION.md) - Transport layer architecture
 - [ATBM_IOCTL_API.md](docs/ATBM_IOCTL_API.md) - ATBM transport API reference
-- [ATBM_IMPLEMENTATION_COMPLETE.md](docs/ATBM_IMPLEMENTATION_COMPLETE.md) - ATBM implementation details
 
 ## Requirements
 
