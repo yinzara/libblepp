@@ -82,6 +82,9 @@ namespace BLEPP
 
 		// Helper methods
 
+		/// Send SSV6158 vendor command to enable ACL/Event routing
+		int send_ssv_acl_routing_command(int fd);
+
 		/// Open HCI device socket
 		int open_hci_device();
 
@@ -103,6 +106,10 @@ namespace BLEPP
 		/// Build advertising data from parameters
 		int build_advertising_data(const AdvertisingParams& params,
 		                          uint8_t* data, uint8_t* len);
+
+		/// Build scan response data from parameters
+		int build_scan_response_data(const AdvertisingParams& params,
+		                            uint8_t* data, uint8_t* len);
 
 		/// Accept connection on L2CAP socket
 		int accept_l2cap_connection();

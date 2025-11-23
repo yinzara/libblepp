@@ -28,10 +28,17 @@
 #include <blepp/logging.h>
 #include <blepp/att.h>
 
+#ifdef BLEPP_NIMBLE_SUPPORT
+#include <blepp/nimble_transport.h>
+#endif
+
 #include <algorithm>
 #include <cstring>
 #include <thread>
 #include <chrono>
+#include <sstream>
+#include <iomanip>
+#include <unistd.h>  // for usleep()
 
 namespace BLEPP
 {
@@ -102,7 +109,27 @@ BLEGATTServer::~BLEGATTServer()
 int BLEGATTServer::register_services(const std::vector<GATTServiceDef>& services)
 {
 	ENTER();
-	return db_.register_services(services);
+
+	// Register with attribute database (for BlueZ transport)
+	int rc = db_.register_services(services);
+	if (rc != 0) {
+		return rc;
+	}
+
+	// For NimbleTransport, also register with NimBLE GATTS
+#ifdef BLEPP_NIMBLE_SUPPORT
+	NimbleTransport* nimble_transport = dynamic_cast<NimbleTransport*>(transport_.get());
+	if (nimble_transport) {
+		LOG(Info, "Registering services with NimbleTransport");
+		rc = nimble_transport->register_services(services);
+		if (rc != 0) {
+			LOG(Error, "Failed to register services with NimbleTransport: " << rc);
+			return rc;
+		}
+	}
+#endif
+
+	return 0;
 }
 
 int BLEGATTServer::start_advertising(const AdvertisingParams& params)
@@ -348,7 +375,14 @@ void BLEGATTServer::handle_att_pdu(uint16_t conn_handle,
 		break;
 
 	default:
-		LOG(Warning, "Unsupported ATT opcode: 0x" << std::hex << (int)opcode);
+		// Log hex dump of unknown opcode
+		std::stringstream hex_dump;
+		hex_dump << std::hex << std::setfill('0');
+		for (size_t i = 0; i < len && i < 32; i++) {
+			hex_dump << std::setw(2) << (int)pdu[i] << " ";
+		}
+		LOG(Warning, "Unsupported ATT opcode: 0x" << std::hex << (int)opcode
+		            << " PDU: " << hex_dump.str());
 		send_error_response(conn_handle, opcode, 0x0000, BLE_ATT_ERR_REQ_NOT_SUPPORTED);
 		break;
 	}
@@ -610,8 +644,16 @@ void BLEGATTServer::handle_read_by_group_type_req(uint16_t conn_handle,
 		return;
 	}
 
+	// Log request bytes
+	std::stringstream req_hex;
+	req_hex << std::hex << std::setfill('0');
+	for (size_t i = 0; i < len; i++) {
+		req_hex << std::setw(2) << (int)pdu[i] << " ";
+	}
+
 	LOG(Debug, "Read By Group Type: start=0x" << std::hex << start_handle
-	           << " end=0x" << end_handle << " type=" << type_uuid.str() << std::dec);
+	           << " end=0x" << end_handle << " type=" << type_uuid.str() << std::dec
+	           << " [" << req_hex.str() << "]");
 
 	// Only Primary Service (0x2800) is a grouping attribute
 	if (type_uuid != UUID(0x2800)) {
@@ -623,10 +665,19 @@ void BLEGATTServer::handle_read_by_group_type_req(uint16_t conn_handle,
 	// Find primary services in range
 	auto attrs = db_.find_by_type(start_handle, end_handle, type_uuid);
 
+	LOG(Debug, "Found " << attrs.size() << " services matching type " << type_uuid.str());
+
 	if (attrs.empty()) {
+		LOG(Debug, "No services found in range, sending Attribute Not Found error");
 		send_error_response(conn_handle, ATT_OP_READ_BY_GROUP_TYPE_REQ,
 		                   start_handle, BLE_ATT_ERR_ATTR_NOT_FOUND);
 		return;
+	}
+
+	// Check if this is a continuation request (start_handle > 1)
+	// If so, and we found services, this means we're continuing discovery
+	if (start_handle > 1) {
+		LOG(Debug, "Continuation request from handle " << start_handle);
 	}
 
 	send_read_by_group_type_rsp(conn_handle, attrs);
@@ -649,12 +700,20 @@ void BLEGATTServer::send_read_by_group_type_rsp(uint16_t conn_handle,
 	rsp.push_back(pair_len);
 
 	uint16_t mtu = transport_->get_mtu(conn_handle);
-	size_t max_data = mtu - 2;
+
+	LOG(Debug, "Building Read By Group Type response: uuid_size=" << (int)uuid_size
+	           << " pair_len=" << (int)pair_len << " mtu=" << mtu);
 
 	for (const auto* attr : attrs) {
-		if (rsp.size() + pair_len > max_data) {
+		// Check if we have room for another pair
+		if (rsp.size() + pair_len > mtu) {
+			LOG(Debug, "MTU limit reached: rsp.size()=" << rsp.size() << " pair_len=" << (int)pair_len << " mtu=" << mtu);
 			break;
 		}
+
+		LOG(Debug, "Adding service: handle=" << attr->handle
+		           << " end_handle=" << attr->end_group_handle
+		           << " value_size=" << attr->value.size());
 
 		// Start handle
 		rsp.push_back(attr->handle & 0xFF);
@@ -665,10 +724,53 @@ void BLEGATTServer::send_read_by_group_type_rsp(uint16_t conn_handle,
 		rsp.push_back((attr->end_group_handle >> 8) & 0xFF);
 
 		// Service UUID (from attribute value)
-		if (attr->value.size() >= 2) {
-			rsp.insert(rsp.end(), attr->value.begin(), attr->value.begin() + std::min(uuid_size, (uint8_t)attr->value.size()));
+		if (attr->value.size() >= uuid_size) {
+			rsp.insert(rsp.end(), attr->value.begin(), attr->value.begin() + uuid_size);
+		} else {
+			// Value is smaller than expected - pad with zeros or send error
+			LOG(Warning, "Service value size mismatch: expected=" << (int)uuid_size << " actual=" << attr->value.size());
+			rsp.insert(rsp.end(), attr->value.begin(), attr->value.end());
+			// Pad with zeros if needed
+			for (size_t i = attr->value.size(); i < uuid_size; i++) {
+				rsp.push_back(0);
+			}
 		}
 	}
+
+	// Validate response format before sending
+	size_t expected_size = 2 + (pair_len * (rsp.size() - 2) / pair_len);
+	if (rsp.size() != expected_size && rsp.size() >= 2) {
+		LOG(Warning, "Response size mismatch: actual=" << rsp.size()
+		            << " expected=" << expected_size
+		            << " (may indicate incomplete service data)");
+	}
+
+	// Log hex dump of response
+	std::stringstream hex_dump;
+	hex_dump << std::hex << std::setfill('0');
+	for (size_t i = 0; i < rsp.size(); i++) {
+		hex_dump << std::setw(2) << (int)rsp[i] << " ";
+	}
+	LOG(Debug, "Sending Read By Group Type response: " << rsp.size() << " bytes: " << hex_dump.str());
+
+	// Additional validation: Check that data length matches what length field claims
+	if (rsp.size() >= 2) {
+		uint8_t length_field = rsp[1];
+		size_t num_entries = (rsp.size() - 2) / length_field;
+		size_t expected_total = 2 + (num_entries * length_field);
+		LOG(Debug, "Response validation: length_field=" << (int)length_field
+		           << " num_entries=" << num_entries
+		           << " calculated_size=" << expected_total
+		           << " actual_size=" << rsp.size());
+	}
+
+	// CRITICAL FIX: Add small delay before sending response
+	// Android GATT client has a race condition where it queues the command AFTER sending the request.
+	// If our response arrives before Android queues the command (lines 497-498 in att_protocol.cc),
+	// gatt_cmd_dequeue() returns NULL and the response is silently dropped.
+	// This causes a 5-second timeout and retry.
+	// Delay ensures Android has time to queue the command before our response arrives.
+	usleep(20000);  // 20ms delay
 
 	transport_->send_pdu(conn_handle, rsp.data(), rsp.size());
 }

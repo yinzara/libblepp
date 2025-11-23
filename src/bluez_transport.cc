@@ -39,6 +39,8 @@
 #include <cerrno>
 #include <cstring>
 #include <stdexcept>
+#include <sstream>
+#include <iomanip>
 
 namespace BLEPP
 {
@@ -73,6 +75,46 @@ BlueZTransport::~BlueZTransport()
 	cleanup();
 }
 
+int BlueZTransport::send_ssv_acl_routing_command(int fd)
+{
+	ENTER();
+
+	LOG(Info, "Sending SSV6158 ACL routing command (0xFC06)...");
+
+	// SSV6158 vendor-specific HCI command: 0xFC06
+	// This command tells the SSV6158 firmware to route ACL data and events
+	// to/from the external host instead of handling them internally.
+	// Without this command, the firmware accepts outgoing ACL packets but
+	// doesn't actually transmit them over the BLE radio.
+	//
+	// Command structure:
+	// OGF: 0x3F (vendor-specific)
+	// OCF: 0x06 (SSV_ACL_EVT_TO_EXTERNAL_HOST)
+	// Parameters: none
+
+	struct hci_request rq;
+	memset(&rq, 0, sizeof(rq));
+	rq.ogf = 0x3F;  // OGF_VENDOR_CMD
+	rq.ocf = 0x06;  // SSV_ACL_EVT_TO_EXTERNAL_HOST
+	rq.cparam = nullptr;
+	rq.clen = 0;
+	rq.rparam = nullptr;
+	rq.rlen = 0;
+
+	int ret = hci_send_req(fd, &rq, 1000);  // 1 second timeout
+	if (ret < 0) {
+		LOG(Warning, "Failed to send SSV ACL routing command: " << strerror(errno));
+		return -1;
+	}
+
+	LOG(Info, "SSV6158 ACL routing command sent successfully");
+
+	// Give firmware a moment to process the command
+	usleep(100000);  // 100ms delay
+
+	return 0;
+}
+
 int BlueZTransport::open_hci_device()
 {
 	ENTER();
@@ -95,6 +137,19 @@ int BlueZTransport::open_hci_device()
 	}
 
 	LOG(Info, "Opened HCI device hci" << dev_id << " (fd=" << fd << ")");
+
+	// Send SSV6158 vendor command to enable ACL/Event routing to external host
+	// This is required for SSV6158 firmware to actually transmit ACL data packets
+	// over the air when operating as a BLE peripheral/server.
+	// Command: 0xFC06 (OGF=0x3F vendor-specific, OCF=0x06)
+	LOG(Info, "About to call send_ssv_acl_routing_command...");
+	int ssv_result = send_ssv_acl_routing_command(fd);
+	LOG(Info, "send_ssv_acl_routing_command returned: " << ssv_result);
+	if (ssv_result < 0) {
+		LOG(Warning, "Failed to send SSV ACL routing command (not SSV6158 chip?)");
+		// Don't fail initialization - this is only needed for SSV6158
+	}
+
 	return fd;
 }
 
@@ -257,6 +312,7 @@ int BlueZTransport::build_advertising_data(const AdvertisingParams& params,
 	*ptr++ = 0x06;  // LE General Discoverable, BR/EDR not supported
 
 	// Complete list of 16-bit Service UUIDs (if any)
+	// Note: 128-bit UUIDs are placed in scan response data due to size constraints
 	if (!params.service_uuids.empty()) {
 		uint8_t* len_ptr = ptr++;
 		*ptr++ = 0x03;  // Type: Complete list of 16-bit UUIDs
@@ -270,7 +326,13 @@ int BlueZTransport::build_advertising_data(const AdvertisingParams& params,
 			}
 		}
 
-		*len_ptr = 1 + uuid_count * 2;  // Type byte + UUIDs
+		// Only keep this section if we actually added UUIDs
+		if (uuid_count > 0) {
+			*len_ptr = 1 + uuid_count * 2;  // Type byte + UUIDs
+		} else {
+			// No 16-bit UUIDs, revert the pointer
+			ptr = len_ptr;
+		}
 	}
 
 	// Device name
@@ -326,16 +388,70 @@ int BlueZTransport::set_advertising_data(const AdvertisingParams& params)
 	return 0;
 }
 
+int BlueZTransport::build_scan_response_data(const AdvertisingParams& params,
+                                             uint8_t* data, uint8_t* len)
+{
+	ENTER();
+
+	uint8_t* ptr = data;
+
+	// If custom scan response data is provided, use it
+	if (params.scan_response_data_len > 0) {
+		memcpy(data, params.scan_response_data, params.scan_response_data_len);
+		*len = params.scan_response_data_len;
+		return 0;
+	}
+
+	// Otherwise, build scan response with 128-bit UUIDs if present
+	std::vector<UUID> uuid128_list;
+	for (const auto& uuid : params.service_uuids) {
+		if (uuid.type == BT_UUID128) {
+			uuid128_list.push_back(uuid);
+		}
+	}
+
+	if (!uuid128_list.empty()) {
+		// Add 128-bit UUIDs to scan response
+		size_t space_needed = 2 + uuid128_list.size() * 16;  // Length + Type + UUIDs
+		if (space_needed <= 31) {
+			uint8_t* len_ptr = ptr++;
+			*ptr++ = 0x07;  // Type: Complete list of 128-bit UUIDs
+
+			for (const auto& uuid : uuid128_list) {
+				// 128-bit UUIDs in advertising are in little-endian (different from ATT!)
+				// So we use the data as-is
+				memcpy(ptr, uuid.value.u128.data, 16);
+				ptr += 16;
+			}
+
+			*len_ptr = 1 + uuid128_list.size() * 16;  // Type byte + UUIDs
+		} else {
+			LOG(Warning, "Not enough space for 128-bit UUIDs in scan response");
+		}
+	}
+
+	*len = ptr - data;
+	LOG(Debug, "Built scan response data: " << (int)*len << " bytes");
+	return 0;
+}
+
 int BlueZTransport::set_scan_response_data(const AdvertisingParams& params)
 {
 	ENTER();
 
-	// Use custom scan response if provided
-	if (params.scan_response_data_len > 0) {
+	uint8_t data[31];
+	uint8_t len;
+
+	if (build_scan_response_data(params, data, &len) < 0) {
+		return -1;
+	}
+
+	// Only send scan response if there's data
+	if (len > 0) {
 		le_set_scan_response_data_cp cmd;
-		cmd.length = params.scan_response_data_len;
+		cmd.length = len;
 		memset(cmd.data, 0, sizeof(cmd.data));
-		memcpy(cmd.data, params.scan_response_data, params.scan_response_data_len);
+		memcpy(cmd.data, data, len);
 
 		struct hci_request rq;
 		memset(&rq, 0, sizeof(rq));
@@ -457,13 +573,26 @@ int BlueZTransport::send_pdu(uint16_t conn_handle, const uint8_t* data, size_t l
 		return -1;
 	}
 
+	// Log hex dump of data being sent
+	std::stringstream hex_dump;
+	hex_dump << std::hex << std::setfill('0');
+	for (size_t i = 0; i < len; i++) {
+		hex_dump << std::setw(2) << (int)data[i] << " ";
+	}
+	LOG(Debug, "Sending " << std::dec << len << " bytes: " << hex_dump.str());
+
 	ssize_t sent = send(it->second.fd, data, len, 0);
 	if (sent < 0) {
 		LOG(Error, "send() failed: " << strerror(errno));
 		return -1;
 	}
 
-	LOG(Debug, "Sent " << sent << " bytes to connection " << conn_handle);
+	if ((size_t)sent != len) {
+		LOG(Warning, "Partial send: sent=" << sent << " expected=" << len);
+	} else {
+		LOG(Debug, "Successfully sent " << sent << " bytes to connection " << conn_handle);
+	}
+
 	return sent;
 }
 
@@ -479,6 +608,12 @@ int BlueZTransport::recv_pdu(uint16_t conn_handle, uint8_t* buf, size_t len)
 	if (received < 0) {
 		if (errno == EAGAIN || errno == EWOULDBLOCK) {
 			return 0;  // No data available
+		}
+		// Connection errors - disconnect and stop trying
+		if (errno == ENOTCONN || errno == ECONNRESET || errno == EPIPE) {
+			LOG(Info, "Connection " << conn_handle << " error: " << strerror(errno) << " - disconnecting");
+			disconnect(conn_handle);
+			return 0;
 		}
 		LOG(Error, "recv() failed: " << strerror(errno));
 		return -1;

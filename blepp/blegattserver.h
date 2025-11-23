@@ -34,6 +34,7 @@
 #include <map>
 #include <mutex>
 #include <functional>
+#include <chrono>
 
 namespace BLEPP
 {
@@ -44,6 +45,7 @@ namespace BLEPP
 		uint16_t mtu;                              ///< Negotiated MTU (default 23)
 		std::map<uint16_t, uint16_t> cccd_values;  ///< CCCD values per characteristic
 		bool connected;
+		std::chrono::steady_clock::time_point connection_time;  ///< When connection was established
 	};
 
 	/// BLE GATT Server

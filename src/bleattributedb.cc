@@ -29,6 +29,9 @@
 #include <blepp/logging.h>
 #include <blepp/att.h>
 #include <algorithm>
+#include <sstream>
+#include <iomanip>
+#include <cstring>
 
 namespace BLEPP
 {
@@ -97,20 +100,30 @@ uint16_t BLEAttributeDatabase::add_primary_service(const UUID& uuid)
 	uint16_t handle = allocate_handle();
 	if (handle == 0) return 0;
 
-	Attribute attr;
+	Attribute attr = {};  // Zero-initialize all fields
 	attr.handle = handle;
 	attr.type = AttributeType::PRIMARY_SERVICE;
 	attr.uuid = UUID_PRIMARY_SERVICE;
 	attr.permissions = ATT_PERM_READ;
+	attr.end_group_handle = handle;  // Initialize to service handle, will be updated later
 
 	// Value is the service UUID
 	if (uuid.type == BT_UUID16) {
 		uint16_t val = uuid.value.u16;
 		attr.value = {(uint8_t)(val & 0xFF), (uint8_t)((val >> 8) & 0xFF)};
 	} else {
-		// 128-bit UUID
+		// 128-bit UUID - Our UUID parsing stores in little-endian, ATT also requires little-endian
+		// So we just copy directly without reversing
 		attr.value.resize(16);
-		memcpy(attr.value.data(), &uuid.value.u128, 16);
+		memcpy(attr.value.data(), uuid.value.u128.data, 16);
+
+		// Debug: log the UUID bytes
+		std::stringstream uuid_hex;
+		uuid_hex << std::hex << std::setfill('0');
+		for (int i = 0; i < 16; i++) {
+			uuid_hex << std::setw(2) << (int)attr.value[i] << " ";
+		}
+		LOG(Info, "Stored primary service UUID bytes (little-endian for ATT): " << uuid_hex.str());
 	}
 
 	attributes_[handle] = attr;
@@ -129,19 +142,29 @@ uint16_t BLEAttributeDatabase::add_secondary_service(const UUID& uuid)
 	uint16_t handle = allocate_handle();
 	if (handle == 0) return 0;
 
-	Attribute attr;
+	Attribute attr = {};  // Zero-initialize all fields
 	attr.handle = handle;
 	attr.type = AttributeType::SECONDARY_SERVICE;
 	attr.uuid = UUID_SECONDARY_SERVICE;
 	attr.permissions = ATT_PERM_READ;
+	attr.end_group_handle = handle;  // Initialize to service handle, will be updated later
 
 	// Value is the service UUID
 	if (uuid.type == BT_UUID16) {
 		uint16_t val = uuid.value.u16;
 		attr.value = {(uint8_t)(val & 0xFF), (uint8_t)((val >> 8) & 0xFF)};
 	} else {
+		// 128-bit UUID - ATT requires little-endian, which is how we store it
 		attr.value.resize(16);
-		memcpy(attr.value.data(), &uuid.value.u128, 16);
+		memcpy(attr.value.data(), uuid.value.u128.data, 16);
+
+		// Debug: log the UUID bytes
+		std::stringstream uuid_hex;
+		uuid_hex << std::hex << std::setfill('0');
+		for (int i = 0; i < 16; i++) {
+			uuid_hex << std::setw(2) << (int)attr.value[i] << " ";
+		}
+		LOG(Info, "Stored secondary service UUID bytes (little-endian for ATT): " << uuid_hex.str());
 	}
 
 	attributes_[handle] = attr;
@@ -229,8 +252,10 @@ uint16_t BLEAttributeDatabase::add_characteristic(uint16_t service_handle,
 		decl_attr.value.push_back(val & 0xFF);
 		decl_attr.value.push_back((val >> 8) & 0xFF);
 	} else {
-		decl_attr.value.resize(decl_attr.value.size() + 16);
-		memcpy(&decl_attr.value[3], &uuid.value.u128, 16);
+		// 128-bit UUID - ATT requires little-endian, which is how we store it
+		size_t start_pos = decl_attr.value.size();
+		decl_attr.value.resize(start_pos + 16);
+		memcpy(&decl_attr.value[start_pos], uuid.value.u128.data, 16);
 	}
 
 	attributes_[decl_handle] = decl_attr;
@@ -461,17 +486,24 @@ std::vector<const Attribute*> BLEAttributeDatabase::find_by_type(
 	uint16_t end_handle,
 	const UUID& type) const
 {
+	ENTER();
+	LOG(Debug, "Searching for type=" << type.str() << " in range [" << start_handle << ", " << end_handle << "]");
+	LOG(Debug, "Total attributes in database: " << attributes_.size());
+
 	std::vector<const Attribute*> results;
 
 	for (const auto& pair : attributes_) {
 		const auto& attr = pair.second;
 		if (attr.handle >= start_handle && attr.handle <= end_handle) {
+			LOG(Debug, "Checking handle " << attr.handle << " with UUID " << attr.uuid.str());
 			if (attr.uuid == type) {
+				LOG(Debug, "  -> MATCH!");
 				results.push_back(&attr);
 			}
 		}
 	}
 
+	LOG(Debug, "Found " << results.size() << " matching attributes");
 	return results;
 }
 

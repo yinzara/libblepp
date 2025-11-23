@@ -25,6 +25,7 @@
 #ifdef BLEPP_NIMBLE_SUPPORT
 
 #include <blepp/nimble_transport.h>
+#include <blepp/gatt_services.h>
 #include <blepp/logging.h>
 
 #include <sys/ioctl.h>
@@ -37,6 +38,23 @@
 #include <cstring>
 #include <stdexcept>
 #include <mutex>
+#include <iomanip>
+
+// NimBLE stack headers
+extern "C" {
+#include "nimble/nimble_port.h"
+#include "host/ble_hs.h"
+#include "host/ble_gap.h"
+#include "host/ble_gatt.h"
+#include "host/util/util.h"
+#include "os/os_mbuf.h"
+
+// ATBM-specific NimBLE port functions
+void nimble_port_atbmos_init(void(* host_task_fn)(void*));
+void nimble_port_atbmos_free(void);
+int hif_ioctl_init(void);
+void ble_hs_sched_start(void);
+}
 
 // ATBM ioctl base number
 #define ATBM_IOCTL                  (121)
@@ -77,6 +95,128 @@ namespace BLEPP
 static NimbleTransport* g_nimble_transport_instance = nullptr;
 static std::mutex g_signal_mutex;
 
+// Global variables for NimBLE stack synchronization
+static uint8_t own_addr_type = 0;
+static bool nimble_synced = false;
+static bool gatts_started = false;
+static std::mutex nimble_sync_mutex;
+static sem_t nimble_sync_sem;
+
+// NimBLE host sync callback - called when BLE stack is ready
+static void nimble_sync_callback(void)
+{
+	int rc;
+
+	LOG(Info, "NimBLE stack sync callback");
+
+	// Ensure we have a valid address
+	rc = ble_hs_util_ensure_addr(0);
+	if (rc != 0) {
+		LOG(Error, "Failed to ensure address: " << rc);
+		return;
+	}
+
+	// Infer own address type
+	rc = ble_hs_id_infer_auto(0, &own_addr_type);
+	if (rc != 0) {
+		LOG(Error, "Failed to infer address type: " << rc);
+		return;
+	}
+
+	{
+		std::lock_guard<std::mutex> lock(nimble_sync_mutex);
+		nimble_synced = true;
+	}
+
+	// Services are already registered before the host task starts
+	// No need to register them here
+
+	// Signal that sync is complete
+	sem_post(&nimble_sync_sem);
+
+	LOG(Info, "NimBLE stack synchronized, address type: " << (int)own_addr_type);
+}
+
+// NimBLE GAP event callback - handles connection/disconnection events
+static int nimble_gap_event_callback(struct ble_gap_event *event, void *arg)
+{
+	switch (event->type) {
+	case BLE_GAP_EVENT_CONNECT:
+		LOG(Info, "GAP Connect event: status=" << event->connect.status);
+		if (event->connect.status == 0) {
+			LOG(Info, "Connected: handle=" << event->connect.conn_handle);
+		} else {
+			// Connection failed, restart advertising
+			LOG(Info, "Connection failed, restarting advertising");
+			std::lock_guard<std::mutex> lock(g_signal_mutex);
+			if (g_nimble_transport_instance) {
+				g_nimble_transport_instance->restart_advertising();
+			}
+		}
+		break;
+
+	case BLE_GAP_EVENT_DISCONNECT:
+		LOG(Info, "GAP Disconnect event: reason=" << event->disconnect.reason);
+		// Resume advertising after disconnect
+		{
+			std::lock_guard<std::mutex> lock(g_signal_mutex);
+			if (g_nimble_transport_instance) {
+				g_nimble_transport_instance->restart_advertising();
+			}
+		}
+		break;
+
+	case BLE_GAP_EVENT_ADV_COMPLETE:
+		LOG(Info, "GAP Advertising complete");
+		break;
+
+	case BLE_GAP_EVENT_SUBSCRIBE:
+		LOG(Info, "GAP Subscribe event: handle=" << event->subscribe.attr_handle);
+		break;
+
+	case BLE_GAP_EVENT_CONN_UPDATE:
+		LOG(Info, "GAP Connection update: status=" << event->conn_update.status);
+		break;
+
+	case BLE_GAP_EVENT_MTU:
+		LOG(Info, "GAP MTU update: conn_handle=" << event->mtu.conn_handle
+		    << " channel_id=" << event->mtu.channel_id
+		    << " mtu=" << event->mtu.value);
+		break;
+
+	case BLE_GAP_EVENT_NOTIFY_TX:
+		LOG(Debug, "GAP Notify TX: conn_handle=" << event->notify_tx.conn_handle
+		    << " attr_handle=" << event->notify_tx.attr_handle
+		    << " status=" << event->notify_tx.status);
+		break;
+
+	case BLE_GAP_EVENT_NOTIFY_RX:
+		LOG(Debug, "GAP Notify RX: conn_handle=" << event->notify_rx.conn_handle
+		    << " attr_handle=" << event->notify_rx.attr_handle);
+		break;
+
+	default:
+		LOG(Info, "GAP event: type=" << event->type << " (unknown)");
+		break;
+	}
+
+	return 0;
+}
+
+// NimBLE host task function
+static void nimble_host_task(void *param)
+{
+	// Set sync callback
+	ble_hs_cfg.sync_cb = nimble_sync_callback;
+
+	LOG(Info, "NimBLE host task starting");
+
+	// Run NimBLE host stack event loop
+	nimble_port_run();
+
+	LOG(Info, "NimBLE host task stopped");
+}
+
 // Signal handler for SIGIO
 static void nimble_signal_handler(int sig_num)
 {
@@ -93,6 +233,8 @@ NimbleTransport::NimbleTransport(const char* device_path)
 	, ioctl_fd_(-1)
 	, advertising_(false)
 	, next_conn_handle_(1)
+	, host_task_started_(false)
+	, adv_params_valid_(false)
 	, running_(false)
 {
 	ENTER();
@@ -122,19 +264,28 @@ NimbleTransport::NimbleTransport(const char* device_path)
 	// Initialize semaphores
 	sem_init(&event_sem_, 0, 0);
 	sem_init(&ioctl_sem_, 0, 1);
+	sem_init(&nimble_sync_sem, 0, 0);
 
-	// Start Nimble BLE coexistence mode
-	uint8_t dummy_data[16] = {0};
-	if (ioctl(ioctl_fd_, ATBM_BLE_COEXIST_START, (unsigned long)(&dummy_data)) < 0) {
+	// Initialize NimBLE stack
+	LOG(Info, "Initializing NimBLE stack");
+	nimble_port_init();
+
+	// Clear GATT database before registering services
+	// This must be called AFTER nimble_port_init but BEFORE starting host task
+	ble_gatts_reset();
+	LOG(Info, "GATT database reset (before host task start)");
+
+	// Initialize HCI ioctl interface
+	if (hif_ioctl_init() < 0) {
 		close(ioctl_fd_);
-		throw std::runtime_error("Failed to start Nimble BLE coexistence mode");
+		throw std::runtime_error("Failed to initialize HCI ioctl interface");
 	}
 
-	// Start event loop thread
-	running_ = true;
-	event_thread_ = std::thread(&NimbleTransport::event_loop_thread, this);
+	// NOTE: We do NOT start the host task here!
+	// Services must be registered before starting the host task.
+	// The host task will be started in convert_and_register_services() after services are added.
 
-	LOG(Info, "NimbleTransport initialized on " << device_path_);
+	LOG(Info, "NimbleTransport initialized on " << device_path_ << " (host task will start after service registration)");
 }
 
 NimbleTransport::~NimbleTransport()
@@ -159,11 +310,9 @@ void NimbleTransport::cleanup()
 			stop_advertising();
 		}
 
-		// Stop Nimble BLE coexistence mode
-		if (ioctl_fd_ >= 0) {
-			uint8_t dummy_data[16] = {0};
-			ioctl(ioctl_fd_, ATBM_BLE_COEXIST_STOP, (unsigned long)(&dummy_data));
-		}
+		// Shutdown NimBLE stack
+		LOG(Info, "Shutting down NimBLE stack");
+		nimble_port_atbmos_free();
 
 		// Cleanup signal handler
 		{
@@ -183,6 +332,7 @@ void NimbleTransport::cleanup()
 		// Destroy semaphores
 		sem_destroy(&event_sem_);
 		sem_destroy(&ioctl_sem_);
+		sem_destroy(&nimble_sync_sem);
 
 		LOG(Info, "NimbleTransport cleaned up");
 	}
@@ -359,78 +509,105 @@ int NimbleTransport::start_advertising(const AdvertisingParams& params)
 		return 0;
 	}
 
-	// Build advertising data in standard BLE format
-	uint8_t adv_data[256] = {0};
-	uint8_t adv_len = 0;
+	// Store advertising parameters for potential restart after disconnect
+	adv_params_ = params;
+	adv_params_valid_ = true;
 
-	// Add flags (mandatory for discoverable advertising)
-	if (adv_len + 3 <= sizeof(adv_data)) {
-		adv_data[adv_len++] = 2;  // Length
-		adv_data[adv_len++] = 0x01;  // Type: Flags
-		adv_data[adv_len++] = 0x06;  // BR/EDR Not Supported, LE General Discoverable
-	}
-
-	// Add device name if provided
-	if (!params.device_name.empty()) {
-		size_t name_len = params.device_name.length();
-		if (name_len > 0 && adv_len + 2 + name_len <= sizeof(adv_data)) {
-			adv_data[adv_len++] = 1 + name_len;  // Length
-			adv_data[adv_len++] = 0x09;  // Type: Complete Local Name
-			memcpy(&adv_data[adv_len], params.device_name.c_str(), name_len);
-			adv_len += name_len;
-		}
-	}
+	// Set up advertising data using NimBLE GAP API
+	struct ble_hs_adv_fields fields;
+	memset(&fields, 0, sizeof(fields));
 
 	// Add service UUIDs if provided
-	for (size_t i = 0; i < params.service_uuids.size() && i < 8; ++i) {
-		const UUID& uuid = params.service_uuids[i];
-		// Add 128-bit UUIDs
-		if (adv_len + 2 + 16 <= sizeof(adv_data)) {
-			adv_data[adv_len++] = 1 + 16;  // Length
-			adv_data[adv_len++] = 0x07;  // Type: Complete List of 128-bit Service UUIDs
-			memcpy(&adv_data[adv_len], uuid.value.u128.data, 16);
-			adv_len += 16;
+	static ble_uuid128_t service_uuids[8];  // Static storage for UUIDs
+	if (!params.service_uuids.empty()) {
+		size_t num_uuids = (params.service_uuids.size() < 8) ? params.service_uuids.size() : 8;
+		LOG(Info, "Adding " << num_uuids << " service UUIDs to advertising data");
+		for (size_t i = 0; i < num_uuids; ++i) {
+			// Convert UUID to NimBLE format (little-endian)
+			memcpy(service_uuids[i].value, params.service_uuids[i].value.u128.data, 16);
+			service_uuids[i].u.type = BLE_UUID_TYPE_128;
+
+			// Log UUID bytes for debugging
+			LOG(Debug, "UUID[" << i << "] bytes: "
+			    << std::hex << std::setfill('0')
+			    << std::setw(2) << (int)service_uuids[i].value[0] << " "
+			    << std::setw(2) << (int)service_uuids[i].value[1] << " "
+			    << std::setw(2) << (int)service_uuids[i].value[2] << " "
+			    << std::setw(2) << (int)service_uuids[i].value[3]
+			    << std::dec);
 		}
+		fields.uuids128 = service_uuids;
+		fields.num_uuids128 = num_uuids;
+		fields.uuids128_is_complete = 1;
 	}
 
-	// Add custom advertising data if provided
-	if (params.advertising_data_len > 0) {
-		size_t remaining = sizeof(adv_data) - adv_len;
-		size_t copy_len = (params.advertising_data_len < remaining) ? params.advertising_data_len : remaining;
-		memcpy(&adv_data[adv_len], params.advertising_data, copy_len);
-		adv_len += copy_len;
-	}
-
-	sem_wait(&ioctl_sem_);
-	int ret = ioctl(ioctl_fd_, ATBM_BLE_SET_ADV_DATA, (unsigned long)adv_data);
-	if (ret < 0) {
-		sem_post(&ioctl_sem_);
-		LOG(Error, "Failed to set Nimble advertising data: " << strerror(errno));
+	int rc = ble_gap_adv_set_fields(&fields);
+	if (rc != 0) {
+		LOG(Error, "Failed to set advertising fields: " << rc);
 		return -1;
 	}
+	LOG(Info, "Advertising fields set successfully");
 
-	// Set scan response data if provided
-	if (params.scan_response_data_len > 0) {
-		ret = ioctl(ioctl_fd_, ATBM_BLE_SET_RESP_DATA, (unsigned long)params.scan_response_data);
-		if (ret < 0) {
-			sem_post(&ioctl_sem_);
-			LOG(Error, "Failed to set Nimble scan response data: " << strerror(errno));
-			return -1;
-		}
+	// Set scan response data with device name
+	struct ble_hs_adv_fields rsp_fields;
+	memset(&rsp_fields, 0, sizeof(rsp_fields));
+
+	if (!params.device_name.empty()) {
+		rsp_fields.name = (uint8_t*)params.device_name.c_str();
+		rsp_fields.name_len = params.device_name.length();
+		rsp_fields.name_is_complete = 1;
 	}
 
-	// Start advertising
-	ret = ioctl(ioctl_fd_, ATBM_BLE_ADV_RESP_MODE_START, 0);
-	sem_post(&ioctl_sem_);
+	rc = ble_gap_adv_rsp_set_fields(&rsp_fields);
+	if (rc != 0) {
+		LOG(Error, "Failed to set scan response fields: " << rc);
+		return -1;
+	}
+	LOG(Info, "Scan response fields set successfully");
 
-	if (ret < 0) {
-		LOG(Error, "Failed to start Nimble advertising: " << strerror(errno));
+	// Set advertising parameters
+	struct ble_gap_adv_params advp;
+	memset(&advp, 0, sizeof(advp));
+	advp.conn_mode = BLE_GAP_CONN_MODE_UND;  // Undirected connectable
+	advp.disc_mode = BLE_GAP_DISC_MODE_GEN;  // General discoverable
+	// Convert milliseconds to BLE advertising interval units (0.625ms)
+	advp.itvl_min = (params.min_interval_ms * 1000) / 625;  // ms to 0.625ms units
+	advp.itvl_max = (params.max_interval_ms * 1000) / 625;
+
+	LOG(Info, "Starting advertising with interval " << advp.itvl_min
+	    << "-" << advp.itvl_max << " (0.625ms units), own_addr_type=" << (int)own_addr_type);
+
+	// Start advertising using NimBLE GAP API with event callback
+	rc = ble_gap_adv_start(own_addr_type, NULL, BLE_HS_FOREVER, &advp, nimble_gap_event_callback, NULL);
+	if (rc != 0) {
+		LOG(Error, "Failed to start Nimble advertising: " << rc);
 		return -1;
 	}
 
 	advertising_ = true;
 	LOG(Info, "Nimble advertising started: " << params.device_name);
 	return 0;
+}
+
+void NimbleTransport::restart_advertising()
+{
+	ENTER();
+
+	if (!adv_params_valid_) {
+		LOG(Warning, "Cannot restart advertising: no previous advertising parameters");
+		return;
+	}
+
+	LOG(Info, "Restarting advertising after disconnect");
+
+	// Reset advertising flag so start_advertising doesn't bail early
+	advertising_ = false;
+
+	// Restart advertising with stored parameters
+	int rc = start_advertising(adv_params_);
+	if (rc != 0) {
+		LOG(Error, "Failed to restart advertising: " << rc);
+	}
 }
 
 int NimbleTransport::stop_advertising()
@@ -441,19 +618,279 @@ int NimbleTransport::stop_advertising()
 		return 0;
 	}
 
-	// Stop BLE coexistence to stop advertising
-	// This sends BLE_MSG_COEXIST_STOP to the ATBM firmware
-	sem_wait(&ioctl_sem_);
-	int ret = ioctl(ioctl_fd_, ATBM_BLE_COEXIST_STOP, 0);
-	sem_post(&ioctl_sem_);
-
-	if (ret < 0) {
-		LOG(Error, "Failed to stop Nimble advertising: " << strerror(errno));
+	// Stop advertising using NimBLE GAP API
+	int rc = ble_gap_adv_stop();
+	if (rc != 0) {
+		LOG(Error, "Failed to stop Nimble advertising: " << rc);
 		return -1;
 	}
 
 	advertising_ = false;
 	LOG(Info, "Nimble advertising stopped");
+	return 0;
+}
+
+// NimBLE GATT callback bridge structures
+struct NimbleGATTCallbackContext
+{
+	GATTAccessCallback callback;
+	void* user_arg;
+};
+
+// Static storage for NimBLE GATT structures (must persist)
+static std::vector<ble_uuid128_t> nimble_service_uuids;
+static std::vector<ble_uuid128_t> nimble_char_uuids;
+static std::vector<ble_gatt_chr_def> nimble_characteristics;
+static std::vector<ble_gatt_svc_def> nimble_services;
+static std::vector<NimbleGATTCallbackContext> nimble_callbacks;
+
+// NimBLE GATT access callback - bridges to our GATTAccessCallback
+static int nimble_gatt_access_cb(uint16_t conn_handle, uint16_t attr_handle,
+                                  struct ble_gatt_access_ctxt *ctxt, void *arg)
+{
+	LOG(Info, ">>> NimBLE GATT ACCESS CALLBACK <<<");
+	LOG(Info, "conn_handle=" << conn_handle << " attr_handle=" << attr_handle << " op=" << (int)ctxt->op);
+
+	NimbleGATTCallbackContext* ctx = static_cast<NimbleGATTCallbackContext*>(arg);
+	if (!ctx || !ctx->callback) {
+		LOG(Error, "NimBLE GATT callback context is null");
+		return BLE_ATT_ERR_UNLIKELY;
+	}
+
+	// Convert NimBLE operation to our ATTAccessOp
+	ATTAccessOp op;
+	switch (ctxt->op) {
+	case BLE_GATT_ACCESS_OP_READ_CHR:
+		op = ATTAccessOp::READ_CHR;
+		break;
+	case BLE_GATT_ACCESS_OP_WRITE_CHR:
+		op = ATTAccessOp::WRITE_CHR;
+		break;
+	case BLE_GATT_ACCESS_OP_READ_DSC:
+		op = ATTAccessOp::READ_DSC;
+		break;
+	case BLE_GATT_ACCESS_OP_WRITE_DSC:
+		op = ATTAccessOp::WRITE_DSC;
+		break;
+	default:
+		LOG(Warning, "Unknown NimBLE GATT operation: " << ctxt->op);
+		return BLE_ATT_ERR_UNLIKELY;
+	}
+
+	// Prepare data buffer
+	std::vector<uint8_t> data;
+	uint16_t offset = 0;  // NimBLE doesn't use offset for characteristic access
+
+	if (op == ATTAccessOp::WRITE_CHR || op == ATTAccessOp::WRITE_DSC) {
+		// For writes, extract data from mbuf chain
+		size_t len = OS_MBUF_PKTLEN(ctxt->om);
+		LOG(Debug, "Write operation: len=" << len);
+		data.resize(len);
+		os_mbuf_copydata(ctxt->om, 0, data.size(), data.data());
+	}
+
+	// Call our callback
+	LOG(Debug, "Calling application callback: op=" << (int)op << " data_len=" << data.size());
+	int result = ctx->callback(conn_handle, op, offset, data);
+	LOG(Debug, "Application callback returned: " << result);
+
+	if (op == ATTAccessOp::READ_CHR || op == ATTAccessOp::READ_DSC) {
+		// For reads, copy data to mbuf
+		LOG(Debug, "Read operation: result=" << result << " data_len=" << data.size());
+		if (result == 0 && !data.empty()) {
+			int rc = os_mbuf_append(ctxt->om, data.data(), data.size());
+			if (rc != 0) {
+				LOG(Error, "Failed to append data to mbuf: " << rc);
+				return BLE_ATT_ERR_INSUFFICIENT_RES;
+			}
+			LOG(Debug, "Successfully appended " << data.size() << " bytes to mbuf");
+		}
+	}
+
+	return result;
+}
+
+int NimbleTransport::convert_and_register_services()
+{
+	ENTER();
+
+	if (service_defs_.empty()) {
+		LOG(Info, "No services to register with NimBLE");
+		return 0;
+	}
+
+	LOG(Info, "Converting " << service_defs_.size() << " services to NimBLE format");
+
+	// Clear previous registrations
+	nimble_service_uuids.clear();
+	nimble_char_uuids.clear();
+	nimble_characteristics.clear();
+	nimble_services.clear();
+	nimble_callbacks.clear();
+
+	// Reserve space to avoid reallocation (which would invalidate pointers)
+	size_t total_chars = 0;
+	for (const auto& svc : service_defs_) {
+		total_chars += svc.characteristics.size();
+	}
+
+	nimble_service_uuids.reserve(service_defs_.size());
+	nimble_char_uuids.reserve(total_chars);
+	nimble_callbacks.reserve(total_chars);
+	nimble_services.reserve(service_defs_.size() + 1);  // +1 for terminator
+
+	// Convert each service
+	for (const auto& svc_def : service_defs_) {
+		// Convert service UUID
+		ble_uuid128_t svc_uuid;
+		memcpy(svc_uuid.value, svc_def.uuid.value.u128.data, 16);
+		svc_uuid.u.type = BLE_UUID_TYPE_128;
+		nimble_service_uuids.push_back(svc_uuid);
+
+		LOG(Info, "Converting service with " << svc_def.characteristics.size() << " characteristics");
+
+		// Start characteristics array for this service
+		size_t char_start_idx = nimble_characteristics.size();
+
+		// Convert each characteristic
+		for (const auto& char_def : svc_def.characteristics) {
+			LOG(Debug, "Converting characteristic with flags=0x" << std::hex << char_def.flags << std::dec
+			    << " has_callback=" << (char_def.access_cb ? "yes" : "no"));
+			// Convert characteristic UUID
+			ble_uuid128_t char_uuid;
+			memcpy(char_uuid.value, char_def.uuid.value.u128.data, 16);
+			char_uuid.u.type = BLE_UUID_TYPE_128;
+			nimble_char_uuids.push_back(char_uuid);
+
+			// Create callback context if callback exists
+			ble_gatt_access_fn* access_cb_ptr = nullptr;
+			void* cb_arg = nullptr;
+
+			if (char_def.access_cb) {
+				NimbleGATTCallbackContext ctx;
+				ctx.callback = char_def.access_cb;
+				ctx.user_arg = char_def.arg;
+				nimble_callbacks.push_back(ctx);
+
+				access_cb_ptr = nimble_gatt_access_cb;
+				cb_arg = &nimble_callbacks.back();
+				LOG(Debug, "Callback registered for characteristic");
+			} else {
+				LOG(Warning, "No callback registered for characteristic with flags=0x" << std::hex << char_def.flags << std::dec);
+			}
+
+			// Convert flags
+			uint16_t nimble_flags = 0;
+			if (char_def.flags & GATT_CHR_F_READ) nimble_flags |= BLE_GATT_CHR_F_READ;
+			if (char_def.flags & GATT_CHR_F_WRITE) nimble_flags |= BLE_GATT_CHR_F_WRITE;
+			if (char_def.flags & GATT_CHR_F_WRITE_NO_RSP) nimble_flags |= BLE_GATT_CHR_F_WRITE_NO_RSP;
+			if (char_def.flags & GATT_CHR_F_NOTIFY) nimble_flags |= BLE_GATT_CHR_F_NOTIFY;
+			if (char_def.flags & GATT_CHR_F_INDICATE) nimble_flags |= BLE_GATT_CHR_F_INDICATE;
+
+			// Create NimBLE characteristic definition
+			ble_gatt_chr_def chr = {
+				.uuid = &nimble_char_uuids.back().u,
+				.access_cb = access_cb_ptr,
+				.arg = cb_arg,
+				.descriptors = nullptr,  // TODO: Support descriptors
+				.flags = nimble_flags,
+				.min_key_size = char_def.min_key_size,
+				.val_handle = char_def.val_handle_ptr
+			};
+
+			nimble_characteristics.push_back(chr);
+		}
+
+		// Add terminator for characteristics array
+		ble_gatt_chr_def chr_term = {0};
+		nimble_characteristics.push_back(chr_term);
+
+		// Create NimBLE service definition
+		ble_gatt_svc_def svc = {
+			.type = static_cast<uint8_t>((svc_def.type == GATTServiceType::PRIMARY) ?
+			        BLE_GATT_SVC_TYPE_PRIMARY : BLE_GATT_SVC_TYPE_SECONDARY),
+			.uuid = &nimble_service_uuids.back().u,
+			.includes = nullptr,  // TODO: Support included services
+			.characteristics = &nimble_characteristics[char_start_idx]
+		};
+
+		nimble_services.push_back(svc);
+	}
+
+	// Add terminator for services array
+	ble_gatt_svc_def svc_term = {0};
+	nimble_services.push_back(svc_term);
+
+	// Register services with NimBLE GATTS
+	LOG(Info, "Registering " << nimble_services.size() - 1 << " services ("
+	    << nimble_characteristics.size() << " total characteristic entries) with NimBLE GATTS");
+
+	int rc = ble_gatts_count_cfg(nimble_services.data());
+	if (rc != 0) {
+		LOG(Error, "Failed to count NimBLE GATT services: " << rc);
+		return -1;
+	}
+	LOG(Debug, "ble_gatts_count_cfg returned: " << rc);
+
+	rc = ble_gatts_add_svcs(nimble_services.data());
+	if (rc != 0) {
+		LOG(Error, "Failed to add NimBLE GATT services: " << rc);
+		return -1;
+	}
+	LOG(Debug, "ble_gatts_add_svcs returned: " << rc);
+
+	LOG(Info, "Successfully registered " << service_defs_.size() << " services with NimBLE");
+	return 0;
+}
+
+int NimbleTransport::register_services(const std::vector<GATTServiceDef>& services)
+{
+	ENTER();
+
+	// Store service definitions for later use
+	service_defs_ = services;
+
+	LOG(Info, "Storing " << services.size() << " GATT service definitions");
+
+	// Register services with NimBLE IMMEDIATELY (before host task starts)
+	int rc = convert_and_register_services();
+	if (rc != 0) {
+		LOG(Error, "Failed to register services: " << rc);
+		return rc;
+	}
+
+	// Now that services are registered, start the NimBLE host task (if not already started)
+	if (!host_task_started_) {
+		LOG(Info, "Starting NimBLE host task after service registration");
+
+		// Start NimBLE host task (this will trigger the sync callback)
+		nimble_port_atbmos_init(nimble_host_task);
+
+		// Start BLE host scheduler (this triggers the sync callback)
+		LOG(Info, "Starting BLE host scheduler");
+		ble_hs_sched_start();
+
+		//Wait for NimBLE stack to synchronize (with timeout)
+		struct timespec ts;
+		clock_gettime(CLOCK_REALTIME, &ts);
+		ts.tv_sec += 5;  // 5 second timeout
+
+		LOG(Info, "Waiting for NimBLE stack to synchronize...");
+		if (sem_timedwait(&nimble_sync_sem, &ts) < 0) {
+			LOG(Error, "Timeout waiting for NimBLE stack synchronization");
+			return -1;
+		}
+
+		LOG(Info, "NimBLE stack synchronized successfully");
+
+		// Start event loop thread
+		running_ = true;
+		event_thread_ = std::thread(&NimbleTransport::event_loop_thread, this);
+
+		host_task_started_ = true;
+		LOG(Info, "NimBLE host task and event loop started");
+	}
+
 	return 0;
 }
 
@@ -510,17 +947,47 @@ int NimbleTransport::send_pdu(uint16_t conn_handle, const uint8_t* data, size_t 
 		return -1;
 	}
 
-	// Build HCI ACL packet
-	uint8_t hci_packet[HCI_ACL_SHARE_SIZE + 10];
-	uint16_t* plen = reinterpret_cast<uint16_t*>(hci_packet);
+	// Build HCI ACL packet with L2CAP header
+	// Format:
+	//  [0-1]: Length (total packet length for ioctl)
+	//  [2]:   Packet type (BLE_HCI_HIF_ACL = 0x02)
+	//  [3-4]: HCI ACL handle + flags
+	//  [5-6]: HCI ACL data length (L2CAP length + 4 for L2CAP header)
+	//  [7-8]: L2CAP length (ATT PDU length)
+	//  [9-10]: L2CAP CID (0x0004 for ATT)
+	//  [11+]: ATT PDU data
 
-	*plen = len + 5;  // Type byte + HCI ACL header (4 bytes)
-	hci_packet[2] = BLE_HCI_HIF_ACL;
-	hci_packet[3] = conn_handle & 0xFF;
-	hci_packet[4] = (conn_handle >> 8) & 0x0F;  // Plus PB and BC flags
-	hci_packet[5] = len & 0xFF;
-	hci_packet[6] = (len >> 8) & 0xFF;
-	memcpy(&hci_packet[7], data, len);
+	uint8_t hci_packet[HCI_ACL_SHARE_SIZE + 20];
+	size_t offset = 0;
+
+	// [0-1]: Total length for ioctl = 1 (type) + 4 (HCI ACL hdr) + 4 (L2CAP hdr) + len (ATT data)
+	uint16_t total_len = 1 + 4 + 4 + len;
+	hci_packet[offset++] = total_len & 0xFF;
+	hci_packet[offset++] = (total_len >> 8) & 0xFF;
+
+	// [2]: Packet type
+	hci_packet[offset++] = BLE_HCI_HIF_ACL;
+
+	// [3-4]: HCI ACL handle + flags (PB=00, BC=00 for start of L2CAP PDU)
+	hci_packet[offset++] = conn_handle & 0xFF;
+	hci_packet[offset++] = (conn_handle >> 8) & 0x0F;
+
+	// [5-6]: HCI ACL data length (L2CAP header + ATT data)
+	uint16_t acl_len = 4 + len;  // L2CAP header (4) + ATT PDU
+	hci_packet[offset++] = acl_len & 0xFF;
+	hci_packet[offset++] = (acl_len >> 8) & 0xFF;
+
+	// [7-8]: L2CAP length (just the ATT PDU)
+	hci_packet[offset++] = len & 0xFF;
+	hci_packet[offset++] = (len >> 8) & 0xFF;
+
+	// [9-10]: L2CAP CID (0x0004 for ATT)
+	hci_packet[offset++] = 0x04;
+	hci_packet[offset++] = 0x00;
+
+	// [11+]: ATT PDU data
+	memcpy(&hci_packet[offset], data, len);
+	offset += len;
 
 	sem_wait(&ioctl_sem_);
 	int ret = ioctl(ioctl_fd_, ATBM_BLE_HIF_TXDATA, (unsigned long)hci_packet);
@@ -531,7 +998,8 @@ int NimbleTransport::send_pdu(uint16_t conn_handle, const uint8_t* data, size_t 
 		return -1;
 	}
 
-	LOG(Debug, "Sent " << len << " bytes on connection " << conn_handle);
+	LOG(Debug, "Sent " << len << " bytes ATT data on connection " << conn_handle
+	           << " (total HCI packet: " << offset << " bytes)");
 	return len;
 }
 

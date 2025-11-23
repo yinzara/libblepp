@@ -34,9 +34,14 @@
 #include <mutex>
 #include <queue>
 #include <semaphore.h>
+#include <vector>
 
 namespace BLEPP
 {
+	// Forward declarations
+	struct GATTServiceDef;
+	struct GATTCharacteristicDef;
+	struct GATTDescriptorDef;
 	/// Nimble-based BLE transport implementation
 	/// Uses Nimble's /dev/atbm_ioctl interface for communication with BLE controller
 	class NimbleTransport : public BLETransport
@@ -67,8 +72,21 @@ namespace BLEPP
 
 		int process_events() override;
 
+		/// Register GATT services with NimBLE stack
+		/// @param services Vector of service definitions
+		/// @return 0 on success, negative on error
+		int register_services(const std::vector<struct GATTServiceDef>& services);
+
 		/// Called from signal handler to notify event thread
 		void signal_event();
+
+		/// Convert and register services with NimBLE GATTS
+		/// Called from sync callback after stack initialization
+		int convert_and_register_services();
+
+		/// Restart advertising with last used parameters
+		/// Called from GAP event callback after disconnect
+		void restart_advertising();
 
 	private:
 		struct Connection
@@ -88,6 +106,7 @@ namespace BLEPP
 		int ioctl_fd_;
 		bool advertising_;
 		uint16_t next_conn_handle_;
+		bool host_task_started_;  // Track if NimBLE host task has been started
 
 		mutable std::mutex connections_mutex_;
 		std::map<uint16_t, Connection> connections_;
@@ -116,6 +135,13 @@ namespace BLEPP
 			uint16_t len;   // Length of data following this header
 			uint16_t id;    // Message type ID
 		};
+
+		// GATT service bridge
+		std::vector<struct GATTServiceDef> service_defs_;  // Store original service definitions
+
+		// Advertising parameters (stored for restart after disconnect)
+		AdvertisingParams adv_params_;
+		bool adv_params_valid_;
 
 		// Helper methods
 
