@@ -2,7 +2,7 @@
 
 ## Overview
 
-The client functionality of libblepp has been refactored to support multiple transport layers through a unified abstraction. This allows the library to work with both standard BlueZ (HCI/L2CAP) and ATBM-specific hardware (/dev/atbm_ioctl).
+The client functionality of libblepp has been refactored to support multiple transport layers through a unified abstraction. This allows the library to work with both standard BlueZ (HCI/L2CAP) and NIMBLE-specific hardware (/dev/atbm_ioctl).
 
 ---
 
@@ -17,9 +17,9 @@ Three main flags control the build:
    - Standard Linux Bluetooth stack
    - Default for most systems
 
-2. **`BLEPP_ATBM_SUPPORT`** - Enable ATBM transport (/dev/atbm_ioctl)
-   - Uses ATBM-specific ioctl interface
-   - For ATBM WiFi/BLE combo chips
+2. **`BLEPP_NIMBLE_SUPPORT`** - Enable NIMBLE transport (/dev/atbm_ioctl)
+   - Uses NIMBLE-specific ioctl interface
+   - For NIMBLE WiFi/BLE combo chips
    - Can be used with or without BlueZ
 
 3. **`BLEPP_SERVER_SUPPORT`** - Enable server/peripheral mode
@@ -30,12 +30,12 @@ Three main flags control the build:
 
 **Configuration Matrix:**
 
-| BlueZ | ATBM | Server | Result |
+| BlueZ | NIMBLE | Server | Result |
 |-------|------|--------|--------|
 | ON    | OFF  | OFF    | Client-only with BlueZ |
 | ON    | OFF  | ON     | Client + Server with BlueZ |
-| OFF   | ON   | OFF    | Client-only with ATBM |
-| OFF   | ON   | ON     | Client + Server with ATBM |
+| OFF   | ON   | OFF    | Client-only with NIMBLE |
+| OFF   | ON   | ON     | Client + Server with NIMBLE |
 | ON    | ON   | OFF    | Client with both (runtime select) |
 | ON    | ON   | ON     | Full featured with both transports |
 | OFF   | OFF  | any    | **COMPILE ERROR** - need at least one transport |
@@ -52,33 +52,33 @@ cmake -DWITH_BLUEZ_SUPPORT=ON ..
 make
 ```
 
-#### ATBM Only
+#### NIMBLE Only
 ```bash
 # Makefile
-make BLEPP_ATBM_SUPPORT=1
+make BLEPP_NIMBLE_SUPPORT=1
 
 # CMake
-cmake -DWITH_ATBM_SUPPORT=ON ..
+cmake -DWITH_NIMBLE_SUPPORT=ON ..
 make
 ```
 
 #### Both Transports
 ```bash
 # Makefile
-make BLEPP_BLUEZ_SUPPORT=1 BLEPP_ATBM_SUPPORT=1
+make BLEPP_BLUEZ_SUPPORT=1 BLEPP_NIMBLE_SUPPORT=1
 
 # CMake
-cmake -DWITH_BLUEZ_SUPPORT=ON -DWITH_ATBM_SUPPORT=ON ..
+cmake -DWITH_BLUEZ_SUPPORT=ON -DWITH_NIMBLE_SUPPORT=ON ..
 make
 ```
 
 #### Full Build (Both Transports + Server)
 ```bash
 # Makefile
-make BLEPP_BLUEZ_SUPPORT=1 BLEPP_ATBM_SUPPORT=1 BLEPP_SERVER_SUPPORT=1
+make BLEPP_BLUEZ_SUPPORT=1 BLEPP_NIMBLE_SUPPORT=1 BLEPP_SERVER_SUPPORT=1
 
 # CMake
-cmake -DWITH_BLUEZ_SUPPORT=ON -DWITH_ATBM_SUPPORT=ON -DWITH_SERVER_SUPPORT=ON ..
+cmake -DWITH_BLUEZ_SUPPORT=ON -DWITH_NIMBLE_SUPPORT=ON -DWITH_SERVER_SUPPORT=ON ..
 make
 ```
 
@@ -109,7 +109,7 @@ make
       ┌────────────┴────────────┐
       │                         │
 ┌─────▼──────────┐    ┌─────────▼─────────┐
-│ BlueZ          │    │ ATBM              │
+│ BlueZ          │    │ NIMBLE              │
 │ Client         │    │ Client            │
 │ Transport      │    │ Transport         │
 └─────┬──────────┘    └─────────┬─────────┘
@@ -134,11 +134,11 @@ make
 - Gated by `#ifdef BLEPP_BLUEZ_SUPPORT`
 - Located in: `blepp/bluez_client_transport.h` / `src/bluez_client_transport.cc`
 
-#### `ATBMClientTransport`
-- Implements BLEClientTransport using ATBM ioctl
+#### `NIMBLEClientTransport`
+- Implements BLEClientTransport using NIMBLE ioctl
 - Uses /dev/atbm_ioctl for all operations
 - Event-driven with SIGIO signal handling
-- Gated by `#ifdef BLEPP_ATBM_SUPPORT`
+- Gated by `#ifdef BLEPP_NIMBLE_SUPPORT`
 - Located in: `blepp/atbm_client_transport.h` / `src/atbm_client_transport.cc`
 
 ---
@@ -221,8 +221,8 @@ No changes needed! The BLEGATTStateMachine class has been updated internally to 
 ```cpp
 #ifdef BLEPP_BLUEZ_SUPPORT
     transport = new BlueZClientTransport();
-#elif defined(BLEPP_ATBM_SUPPORT)
-    transport = new ATBMClientTransport();
+#elif defined(BLEPP_NIMBLE_SUPPORT)
+    transport = new NIMBLEClientTransport();
 #endif
 
 // Or use factory:
@@ -238,17 +238,17 @@ transport = create_client_transport();  // Returns appropriate transport
 **Headers:**
 - `blepp/bleclienttransport.h` - Abstract transport interface
 - `blepp/bluez_client_transport.h` - BlueZ implementation
-- `blepp/atbm_client_transport.h` - ATBM implementation
+- `blepp/nimble_client_transport.h` - NIMBLE implementation
 
 **Implementation:**
 - `src/bluez_client_transport.cc` - BlueZ transport
-- `src/atbm_client_transport.cc` - ATBM transport
+- `src/nimble_client_transport.cc` - NIMBLE transport
 
 ### Modified Files
 
 **Configuration:**
-- `blepp/blepp_config.h` - Added BLUEZ_SUPPORT and ATBM_SUPPORT flags
-- `CMakeLists.txt` - Added WITH_BLUEZ_SUPPORT and WITH_ATBM_SUPPORT options
+- `blepp/blepp_config.h` - Added BLUEZ_SUPPORT and NIMBLE_SUPPORT flags
+- `CMakeLists.txt` - Added WITH_BLUEZ_SUPPORT and WITH_NIMBLE_SUPPORT options
 - `Makefile.in` - Added conditional compilation for both transports
 
 **Core Classes (Internal Changes Only):**
@@ -256,20 +256,6 @@ transport = create_client_transport();  // Returns appropriate transport
 - `src/blestatemachine.cc` - Refactored to use transport
 - `blepp/lescan.h` - Uses BLEClientTransport for scanning
 - `src/lescan.cc` - Refactored scanner implementation
-
----
-
-## Backward Compatibility
-
-**100% API compatible** for existing code:
-- All existing public APIs remain unchanged
-- Examples compile without modification
-- Only internal implementation changed
-
-**Build compatibility:**
-- Default build (no flags) requires explicit transport selection
-- `BLEPP_SERVER_SUPPORT` still works as before
-- Adding `BLEPP_BLUEZ_SUPPORT=1` restores previous default behavior
 
 ---
 
@@ -282,33 +268,20 @@ make BLEPP_BLUEZ_SUPPORT=1 BLEPP_EXAMPLES=1
 sudo ./examples/lescan_simple
 ```
 
-### Test ATBM Transport
+### Test NIMBLE Transport
 ```bash
 make clean
-make BLEPP_ATBM_SUPPORT=1 BLEPP_EXAMPLES=1
+make BLEPP_NIMBLE_SUPPORT=1 BLEPP_EXAMPLES=1
 sudo ./examples/lescan_simple
 ```
 
 ### Test Both
 ```bash
 make clean
-make BLEPP_BLUEZ_SUPPORT=1 BLEPP_ATBM_SUPPORT=1 BLEPP_EXAMPLES=1
-# Will use default transport (BlueZ if available, ATBM otherwise)
+make BLEPP_BLUEZ_SUPPORT=1 BLEPP_NIMBLE_SUPPORT=1 BLEPP_EXAMPLES=1
+# Will use default transport (BlueZ if available, NIMBLE otherwise)
 sudo ./examples/lescan_simple
 ```
-
----
-
-## Implementation Status
-
-- [x] Phase 1: Transport abstraction interface
-- [x] Phase 2: Configuration system (BLUEZ_SUPPORT/ATBM_SUPPORT)
-- [ ] Phase 3: BlueZ client transport implementation
-- [ ] Phase 4: ATBM client transport implementation
-- [ ] Phase 5: Refactor BLEGATTStateMachine
-- [ ] Phase 6: Refactor HCIScanner
-- [ ] Phase 7: Update build systems (CMake/Makefile)
-- [ ] Phase 8: Testing and validation
 
 ---
 
@@ -317,4 +290,4 @@ sudo ./examples/lescan_simple
 - `BUILD_OPTIONS.md` - Makefile build options
 - `CMAKE_BUILD_GUIDE.md` - CMake build guide
 - `CONDITIONAL_COMPILATION.md` - Preprocessor flags reference
-- `ATBM_IOCTL_API.md` - ATBM ioctl interface specification
+- `NIMBLE_IOCTL_API.md` - NIMBLE ioctl interface specification

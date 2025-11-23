@@ -2,7 +2,7 @@
 
 ## Overview
 
-libblepp now supports CMake for building the library with optional server and ATBM transport support. This guide covers all CMake build configurations and options.
+libblepp now supports CMake for building the library with optional server and NIMBLE transport support. This guide covers all CMake build configurations and options.
 
 ---
 
@@ -28,12 +28,12 @@ make
 sudo make install
 ```
 
-### Server + ATBM Support Build
+### Server + NIMBLE Support Build
 
 ```bash
 mkdir build
 cd build
-cmake -DWITH_SERVER_SUPPORT=ON -DWITH_ATBM_SUPPORT=ON ..
+cmake -DWITH_SERVER_SUPPORT=ON -DWITH_NIMBLE_SUPPORT=ON ..
 make
 sudo make install
 ```
@@ -76,27 +76,22 @@ cmake -DWITH_SERVER_SUPPORT=ON ..
 
 ---
 
-### `WITH_ATBM_SUPPORT`
+### `WITH_NIMBLE_SUPPORT`
 
-**Description:** Enable ATBM ioctl transport
+**Description:** Enable NIMBLE ioctl transport
 
 **Default:** `OFF`
 
 **Requires:** `WITH_SERVER_SUPPORT=ON`
 
 **Effect:**
-- Compiles `src/atbm_transport.cc`
-- Adds `-DBLEPP_ATBM_SUPPORT` to compiler flags
-- Installs ATBM headers
+- Compiles `src/nimble_transport.cc`
+- Adds `-DBLEPP_NIMBLE_SUPPORT` to compiler flags
+- Installs NIMBLE headers
 
 **Usage:**
 ```bash
-cmake -DWITH_SERVER_SUPPORT=ON -DWITH_ATBM_SUPPORT=ON ..
-```
-
-**Error if server not enabled:**
-```
-CMake Error: ATBM support requires server support to be enabled
+cmake -DWITH_SERVER_SUPPORT=ON -DWITH_NIMBLE_SUPPORT=ON ..
 ```
 
 ---
@@ -109,7 +104,7 @@ CMake Error: ATBM support requires server support to be enabled
 |---------------|---------|---------|---------|------|----------|
 | **Client-only** | `cmake ..` | 12 | 9 | ~150 KB | Client only |
 | **+ Server** | `cmake -DWITH_SERVER_SUPPORT=ON ..` | 17 | 12 | ~230 KB | Client + Server (BlueZ) |
-| **+ ATBM** | `cmake -DWITH_SERVER_SUPPORT=ON -DWITH_ATBM_SUPPORT=ON ..` | 18 | 13 | ~260 KB | Client + Server + ATBM |
+| **+ NIMBLE** | `cmake -DWITH_SERVER_SUPPORT=ON -DWITH_NIMBLE_SUPPORT=ON ..` | 18 | 13 | ~260 KB | Client + Server + NIMBLE |
 | **+ Examples** | `cmake -DWITH_EXAMPLES=ON ..` | - | - | - | Build examples too |
 
 ---
@@ -186,14 +181,14 @@ cmake -DCMAKE_BUILD_TYPE=Debug -DWITH_SERVER_SUPPORT=ON ..
 make
 ```
 
-### Example 3: ATBM Build with Custom Prefix
+### Example 3: NIMBLE Build with Custom Prefix
 
 ```bash
 mkdir build && cd build
 cmake \
   -DCMAKE_BUILD_TYPE=Release \
   -DWITH_SERVER_SUPPORT=ON \
-  -DWITH_ATBM_SUPPORT=ON \
+  -DWITH_NIMBLE_SUPPORT=ON \
   -DCMAKE_INSTALL_PREFIX=$HOME/opt/libblepp \
   ..
 make -j$(nproc)
@@ -282,8 +277,8 @@ After building, verify what was compiled:
 # Check for server symbols
 nm -D libble++.so | grep -i "BLEGATTServer\|BlueZTransport"
 
-# Check for ATBM symbols
-nm -D libble++.so | grep -i "ATBMTransport"
+# Check for NIMBLE symbols
+nm -D libble++.so | grep -i "NIMBLETransport"
 
 # List all headers that will be installed
 find blepp -name "*.h" -type f
@@ -305,10 +300,10 @@ int main() {
     std::cout << "Server support: NO" << std::endl;
 #endif
 
-#ifdef BLEPP_ATBM_SUPPORT
-    std::cout << "ATBM support: YES" << std::endl;
+#ifdef BLEPP_NIMBLE_SUPPORT
+    std::cout << "NIMBLE support: YES" << std::endl;
 #else
-    std::cout << "ATBM support: NO" << std::endl;
+    std::cout << "NIMBLE support: NO" << std::endl;
 #endif
     return 0;
 }
@@ -352,9 +347,9 @@ mkdir build-server && cd build-server
 cmake -DWITH_SERVER_SUPPORT=ON ..
 make
 
-# ATBM
-mkdir build-atbm && cd build-atbm
-cmake -DWITH_SERVER_SUPPORT=ON -DWITH_ATBM_SUPPORT=ON ..
+# NIMBLE
+mkdir build-nimble && cd build-nimble
+cmake -DWITH_SERVER_SUPPORT=ON -DWITH_NIMBLE_SUPPORT=ON ..
 make
 ```
 
@@ -441,24 +436,9 @@ sudo dnf install bluez-libs-devel
 sudo pacman -S bluez-libs
 ```
 
-### "ATBM requires server support"
-
-**Cause:** Enabled ATBM without enabling server support
-
 **Solution:**
 ```bash
-cmake -DWITH_SERVER_SUPPORT=ON -DWITH_ATBM_SUPPORT=ON ..
-```
-
-### "undefined reference to pthread_create"
-
-**Cause:** Server support needs pthread but not linked
-
-**Solution:** This should be automatic, but if it fails:
-```bash
-cmake -DWITH_SERVER_SUPPORT=ON ..
-# If that doesn't work:
-cmake -DWITH_SERVER_SUPPORT=ON -DCMAKE_CXX_FLAGS="-pthread" ..
+cmake -DWITH_SERVER_SUPPORT=ON -DWITH_NIMBLE_SUPPORT=ON ..
 ```
 
 ### Headers not found after install
@@ -473,61 +453,6 @@ export PKG_CONFIG_PATH=/opt/libblepp/lib/pkgconfig:$PKG_CONFIG_PATH
 # Or use full path
 g++ -I/opt/libblepp/include myapp.cpp -L/opt/libblepp/lib -lble++
 ```
-
----
-
-## Example CMakeLists.txt for Applications
-
-### Simple Application
-
-```cmake
-cmake_minimum_required(VERSION 3.4)
-project(ble_app)
-
-set(CMAKE_CXX_STANDARD 11)
-
-# Find libblepp
-find_library(BLEPP ble++ REQUIRED)
-find_package(Threads REQUIRED)
-
-# Optional: Check for server support
-option(USE_SERVER "Use server features" ON)
-if(USE_SERVER)
-    add_definitions(-DBLEPP_SERVER_SUPPORT)
-endif()
-
-add_executable(ble_app main.cpp)
-target_link_libraries(ble_app ${BLEPP} bluetooth Threads::Threads)
-```
-
-### Application with Subdirectory
-
-```cmake
-cmake_minimum_required(VERSION 3.4)
-project(ble_app)
-
-# Build options
-option(BUILD_SERVER "Build with server support" ON)
-
-# Configure libblepp
-set(WITH_SERVER_SUPPORT ${BUILD_SERVER} CACHE BOOL "" FORCE)
-set(WITH_EXAMPLES OFF CACHE BOOL "" FORCE)
-add_subdirectory(libs/libblepp)
-
-# Your application
-add_executable(ble_app
-    src/main.cpp
-    src/my_service.cpp
-    src/my_service.h)
-
-target_link_libraries(ble_app ble++)
-
-if(BUILD_SERVER)
-    target_compile_definitions(ble_app PRIVATE BLEPP_SERVER_SUPPORT)
-endif()
-```
-
----
 
 ## Comparison: Make vs CMake
 
@@ -566,58 +491,3 @@ endif()
 2. Select `CMakeLists.txt`
 3. Configure build settings
 4. Build and run
-
----
-
-## Packaging
-
-### Create DEB Package
-
-```bash
-mkdir build && cd build
-cmake -DCMAKE_INSTALL_PREFIX=/usr -DWITH_SERVER_SUPPORT=ON ..
-make -j$(nproc)
-make install DESTDIR=../debian/libblepp
-# Create DEBIAN/control file
-dpkg-deb --build debian/libblepp
-```
-
-### Create RPM Package
-
-```bash
-mkdir build && cd build
-cmake -DCMAKE_INSTALL_PREFIX=/usr -DWITH_SERVER_SUPPORT=ON ..
-make -j$(nproc)
-make install DESTDIR=$HOME/rpmbuild/BUILDROOT/libblepp-1.2-1.x86_64
-# Create RPM spec file
-rpmbuild -ba libblepp.spec
-```
-
----
-
-## Related Documentation
-
-- **Build Options:** `BUILD_OPTIONS.md` - Makefile-based build reference
-- **Conditional Compilation:** `CONDITIONAL_COMPILATION.md` - Preprocessor flags guide
-- **Phase 1 Complete:** `PHASE1_COMPLETE.md` - Transport layer
-- **Phase 2 Complete:** `PHASE2_COMPLETE.md` - Attribute database
-- **Phase 3 Complete:** `PHASE3_COMPLETE.md` - GATT server
-
----
-
-## Summary
-
-**Default build (client-only):**
-```bash
-cmake .. && make && sudo make install
-```
-
-**Server support:**
-```bash
-cmake -DWITH_SERVER_SUPPORT=ON .. && make && sudo make install
-```
-
-**Full build:**
-```bash
-cmake -DWITH_SERVER_SUPPORT=ON -DWITH_ATBM_SUPPORT=ON -DWITH_EXAMPLES=ON .. && make
-```
