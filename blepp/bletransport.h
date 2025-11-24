@@ -49,6 +49,10 @@ namespace BLEPP
 		/// Advertising interval in milliseconds (max)
 		uint16_t max_interval_ms = 200;
 
+		/// Service data (UUID16 + data)
+		uint16_t service_data_uuid16 = 0;
+		std::vector<uint8_t> service_data;
+
 		/// Raw advertising data (max 31 bytes)
 		uint8_t advertising_data[31];
 		uint8_t advertising_data_len = 0;

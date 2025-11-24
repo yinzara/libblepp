@@ -541,6 +541,26 @@ int NimbleTransport::start_advertising(const AdvertisingParams& params)
 		fields.uuids128_is_complete = 1;
 	}
 
+	// Add service data if provided (for Improv WiFi v2.0 compliance)
+	static uint8_t svc_data_buf[31];  // Static storage for service data
+	if (params.service_data_uuid16 != 0 && !params.service_data.empty()) {
+		LOG(Info, "Adding service data for UUID16 0x" << std::hex << params.service_data_uuid16
+		    << std::dec << " (" << params.service_data.size() << " bytes)");
+
+		// Build service data: [UUID16 little-endian][data bytes]
+		svc_data_buf[0] = params.service_data_uuid16 & 0xFF;
+		svc_data_buf[1] = (params.service_data_uuid16 >> 8) & 0xFF;
+		size_t data_len = params.service_data.size();
+		if (data_len > sizeof(svc_data_buf) - 2) {
+			data_len = sizeof(svc_data_buf) - 2;
+			LOG(Warning, "Service data truncated to " << data_len << " bytes");
+		}
+		memcpy(svc_data_buf + 2, params.service_data.data(), data_len);
+
+		fields.svc_data_uuid16 = svc_data_buf;
+		fields.svc_data_uuid16_len = data_len + 2;  // UUID16 (2 bytes) + data
+	}
+
 	int rc = ble_gap_adv_set_fields(&fields);
 	if (rc != 0) {
 		LOG(Error, "Failed to set advertising fields: " << rc);
