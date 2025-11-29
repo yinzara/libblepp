@@ -359,7 +359,7 @@ void NimbleClientTransport::handle_disc_event(const struct ble_gap_disc_desc* di
 	std::string addr_str = addr_to_string(disc->addr.val);
 
 	// Check for duplicates if software filtering is enabled
-	if (scan_params_.filter_duplicates) {
+	if (scan_params_.filter_duplicates == ScanParams::FilterDuplicates::Software) {
 		if (seen_devices_.find(addr_str) != seen_devices_.end()) {
 			return;  // Duplicate
 		}
@@ -572,7 +572,8 @@ int NimbleClientTransport::start_scan(const ScanParams& params)
 	memset(&disc_params, 0, sizeof(disc_params));
 
 	disc_params.passive = params.scan_type == ScanParams::ScanType::Passive ? 1 : 0;
-	disc_params.filter_duplicates = params.filter_duplicates ? 1 : 0;
+	// Hardware filtering only when Hardware mode is selected
+	disc_params.filter_duplicates = (params.filter_duplicates == ScanParams::FilterDuplicates::Hardware) ? 1 : 0;
 	disc_params.filter_policy = BLE_HCI_SCAN_FILT_NO_WL;
 
 	// Convert interval and window from ms to BLE units (0.625ms units)

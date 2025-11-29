@@ -43,11 +43,17 @@ namespace BLEPP
 			WhitelistOnly = 0x01   // Accept only whitelisted devices
 		};
 
+		enum class FilterDuplicates : uint8_t {
+			Off      = 0x00,  // No filtering - get all advertisement events
+			Software = 0x01,  // Filter duplicates in software only
+			Hardware = 0x02   // Filter duplicates in hardware only
+		};
+
 		ScanType scan_type = ScanType::Active;
 		uint16_t interval_ms = 1280;    // Scan interval in ms (default: 1280ms for WiFi coexistence)
 		uint16_t window_ms = 26;        // Scan window in ms (default: 2% duty cycle)
 		FilterPolicy filter_policy = FilterPolicy::All;
-		bool filter_duplicates = true;  // Filter duplicate advertisements
+		FilterDuplicates filter_duplicates = FilterDuplicates::Software;  // Duplicate filtering mode
 	};
 
 	/// Advertisement data received during scanning

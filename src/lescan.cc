@@ -137,10 +137,10 @@ namespace BLEPP
 			return type < e.type;
 	}
 
-	BLEScanner::BLEScanner(BLEClientTransport* transport, FilterDuplicates filter)
+	BLEScanner::BLEScanner(BLEClientTransport* transport)
 	: transport_(transport)
 	, running_(false)
-	, software_filtering_(filter == FilterDuplicates::Software)
+	, filter_mode_(FilterDuplicates::Off)
 	{
 		if (!transport_) {
 			throw std::invalid_argument("BLEScanner: transport cannot be null");
@@ -158,7 +158,7 @@ namespace BLEPP
 		}
 	}
 
-	void BLEScanner::start(bool passive)
+	void BLEScanner::start(const ScanParams& params)
 	{
 		ENTER();
 		if (running_) {
@@ -166,12 +166,8 @@ namespace BLEPP
 			return;
 		}
 
-		// Configure scan parameters
-		ScanParams params;
-		params.scan_type = passive ? ScanParams::ScanType::Passive : ScanParams::ScanType::Active;
-		params.interval_ms = 1280;  // 1280ms for WiFi coexistence
-		params.window_ms = 26;      // 2% duty cycle (~25.6ms)
-		params.filter_duplicates = !software_filtering_;  // Hardware filtering if not software filtering
+		// Store the filter mode from params for use in get_advertisements()
+		filter_mode_ = params.filter_duplicates;
 
 		int result = transport_->start_scan(params);
 		if (result < 0) {
@@ -181,6 +177,16 @@ namespace BLEPP
 		scanned_devices_.clear();
 		running_ = true;
 		LOG(Info, "BLE scanner started");
+	}
+
+	void BLEScanner::start(bool passive)
+	{
+		ScanParams params;
+		params.scan_type = passive ? ScanParams::ScanType::Passive : ScanParams::ScanType::Active;
+		params.interval_ms = 500;  // 500ms for WiFi coexistence
+		params.window_ms = 150;      // 10% duty cycle (~50ms)
+		params.filter_duplicates = filter_mode_;  // Use constructor-specified filter mode
+		start(params);
 	}
 
 	void BLEScanner::stop()
@@ -226,7 +232,7 @@ namespace BLEPP
 			resp.raw_packet.push_back(ad.data);
 
 			// Software filtering if enabled
-			if (software_filtering_) {
+			if (filter_mode_ == FilterDuplicates::Software) {
 				FilterEntry entry(resp);
 				if (scanned_devices_.count(entry)) {
 					continue;  // Skip duplicate

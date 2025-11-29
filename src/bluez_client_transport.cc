@@ -220,7 +220,7 @@ int BlueZClientTransport::start_scan(const ScanParams& params)
 	LOG(Debug, "Scan params: type=" << (int)params.scan_type
 	          << " interval=" << params.interval_ms << "ms"
 	          << " window=" << params.window_ms << "ms"
-	          << " filter_duplicates=" << params.filter_duplicates);
+	          << " filter_duplicates=" << (int)params.filter_duplicates);
 
 	// Set scan parameters
 	LOG(Debug, "Setting scan parameters...");
@@ -229,9 +229,10 @@ int BlueZClientTransport::start_scan(const ScanParams& params)
 		return -1;
 	}
 
-	// Enable scanning
+	// Enable scanning - hardware filtering only when Hardware mode is selected
 	LOG(Debug, "Enabling scanning...");
-	if (set_scan_enable(true, params.filter_duplicates) < 0) {
+	bool hw_filter = (params.filter_duplicates == ScanParams::FilterDuplicates::Hardware);
+	if (set_scan_enable(true, hw_filter) < 0) {
 		LOG(Error, "Failed to enable scanning");
 		return -1;
 	}
@@ -449,8 +450,8 @@ int BlueZClientTransport::parse_advertising_report(const uint8_t* data, size_t l
 		ad.rssi = (int8_t)(*ptr);
 		ptr++;
 
-		// Apply software duplicate filtering if enabled
-		if (scan_params_.filter_duplicates) {
+		// Apply software duplicate filtering if Software mode is selected
+		if (scan_params_.filter_duplicates == ScanParams::FilterDuplicates::Software) {
 			if (seen_devices_.count(ad.address) > 0) {
 				continue;  // Skip duplicate
 			}

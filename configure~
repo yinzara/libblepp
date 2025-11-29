@@ -3719,21 +3719,13 @@ Expected location: $NIMBLE_ROOT/lib/libnimble.so or $NIMBLE_ROOT/build/libnimble
 		fi
 	fi
 
-	# If NIMBLE_LIBDIR is set, add to LDFLAGS
+	# If NIMBLE_LIBDIR is set, add to LDFLAGS and check for library
 	if test "x$NIMBLE_LIBDIR" != "x"; then
 		LDFLAGS="$LDFLAGS -L$NIMBLE_LIBDIR -Wl,-rpath,$NIMBLE_LIBDIR"
+	fi
 
-		# Verify the library file exists
-		if test -f "$NIMBLE_LIBDIR/libnimble.so" || test -f "$NIMBLE_LIBDIR/libnimble.a"; then
-			{ printf "%s\n" "$as_me:${as_lineno-$LINENO}: Found Nimble library in $NIMBLE_LIBDIR" >&5
-printf "%s\n" "$as_me: Found Nimble library in $NIMBLE_LIBDIR" >&6;}
-			LIBS="$LIBS -lnimble"
-		else
-			as_fn_error $? "Nimble library not found in $NIMBLE_LIBDIR. Expected libnimble.so or libnimble.a" "$LINENO" 5
-		fi
-	else
-		# No NIMBLE_LIBDIR specified, try to find nimble in standard paths
-		{ printf "%s\n" "$as_me:${as_lineno-$LINENO}: checking for library containing ble_gap_disc" >&5
+	# Check for nimble library
+	{ printf "%s\n" "$as_me:${as_lineno-$LINENO}: checking for library containing ble_gap_disc" >&5
 printf %s "checking for library containing ble_gap_disc... " >&6; }
 if test ${ac_cv_search_ble_gap_disc+y}
 then :
@@ -3793,12 +3785,11 @@ then :
 
 else case e in #(
   e)
-			as_fn_error $? "Nimble library not found. Please set NIMBLE_LIBDIR or ensure libnimble is in your library path." "$LINENO" 5
-		 ;;
+		as_fn_error $? "Nimble library not found. Please set NIMBLE_LIBDIR or ensure libnimble is in your library path." "$LINENO" 5
+	 ;;
 esac
 fi
 
-	fi
 
 	BLEPP_NIMBLE_SUPPORT=1
 

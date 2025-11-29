@@ -32,6 +32,7 @@
 #include <set>
 #include <unistd.h>
 #include <blepp/blestatemachine.h> //for UUID. FIXME mofo
+#include <blepp/bleclienttransport.h>
 
 #ifdef BLEPP_BLUEZ_SUPPORT
 #include <bluetooth/hci.h>
@@ -213,20 +214,19 @@ namespace BLEPP
 	class BLEScanner
 	{
 	public:
-		enum class FilterDuplicates
-		{
-			Off,      // Get all advertisement events
-			Software  // Filter duplicates in software
-		};
+		using FilterDuplicates = ScanParams::FilterDuplicates;
 
 		/// Constructor
 		/// @param transport Pointer to transport implementation (must outlive scanner)
-		/// @param filter_duplicates Whether to filter duplicate advertisements
-		explicit BLEScanner(BLEClientTransport* transport, FilterDuplicates filter = FilterDuplicates::Software);
+		explicit BLEScanner(BLEClientTransport* transport);
 
 		~BLEScanner();
 
-		/// Start scanning for BLE devices
+		/// Start scanning for BLE devices with custom parameters
+		/// @param params Scan parameters (interval, window, type, etc.)
+		void start(const ScanParams& params);
+
+		/// Start scanning for BLE devices (backwards compatible)
 		/// @param passive If true, use passive scanning (lower power)
 		void start(bool passive = false);
 
@@ -252,7 +252,7 @@ namespace BLEPP
 
 		BLEClientTransport* transport_;
 		bool running_;
-		bool software_filtering_;
+		FilterDuplicates filter_mode_;
 		std::set<FilterEntry> scanned_devices_;
 	};
 

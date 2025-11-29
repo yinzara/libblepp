@@ -7,7 +7,14 @@ datarootdir = @datarootdir@
 pkgconfig = @PKGCONFIG_LIBDIR@
 srcdir = @srcdir@
 libdir=@libdir@
-LOADLIBES =
+LOADLIBES = @LIBS@
+
+# Transport support flags from configure
+BLEPP_BLUEZ_SUPPORT = @BLEPP_BLUEZ_SUPPORT@
+BLEPP_NIMBLE_SUPPORT = @BLEPP_NIMBLE_SUPPORT@
+BLEPP_SERVER_SUPPORT = @BLEPP_SERVER_SUPPORT@
+NIMBLE_ROOT = @NIMBLE_ROOT@
+NIMBLE_LIBDIR = @NIMBLE_LIBDIR@
 
 vpath %.cc $(srcdir)
 
@@ -33,31 +40,27 @@ set_soname=-Wl,-soname,libble++.so.0
 # lescan.o contains parse_advertisement_packet() which is transport-agnostic
 LIBOBJS=src/att.o src/uuid.o src/bledevice.o src/att_pdu.o src/pretty_printers.o src/blestatemachine.o src/float.o src/logging.o src/lescan.o src/bleclienttransport.o
 
-# Validate: require at least one transport
-ifndef BLEPP_BLUEZ_SUPPORT
-ifndef BLEPP_NIMBLE_SUPPORT
+# Validate: require at least one transport (configure already checks this, but keep for manual builds)
+ifeq ($(strip $(BLEPP_BLUEZ_SUPPORT)),)
+ifeq ($(strip $(BLEPP_NIMBLE_SUPPORT)),)
 $(error At least one of BLEPP_BLUEZ_SUPPORT or BLEPP_NIMBLE_SUPPORT must be defined)
 endif
 endif
 
 # BlueZ transport support (client + optional server)
-ifdef BLEPP_BLUEZ_SUPPORT
+ifneq ($(strip $(BLEPP_BLUEZ_SUPPORT)),)
 LIBOBJS+=src/bluez_client_transport.o
 CXXFLAGS+=-DBLEPP_BLUEZ_SUPPORT
-LOADLIBES+=-lbluetooth
 endif
 
 # Nimble transport support (client + optional server)
-ifdef BLEPP_NIMBLE_SUPPORT
+ifneq ($(strip $(BLEPP_NIMBLE_SUPPORT)),)
 LIBOBJS+=src/nimble_client_transport.o
 CXXFLAGS+=-DBLEPP_NIMBLE_SUPPORT
 CXXFLAGS+=-DCONFIG_LINUX_BLE_STACK_APP=1
 
-# Find Nimble BLE stack (required for Nimble transport)
-NIMBLE_ROOT ?= $(shell pwd)/../atbm-wifi/ble_host/nimble_v42
-
-ifneq ($(wildcard $(NIMBLE_ROOT)),)
-# Add Nimble include directories
+# Add Nimble include directories (NIMBLE_ROOT set by configure)
+ifneq ($(strip $(NIMBLE_ROOT)),)
 CXXFLAGS+=-I$(NIMBLE_ROOT)/nimble/include \
     -I$(NIMBLE_ROOT)/nimble/host/include \
     -I$(NIMBLE_ROOT)/nimble/host/services/gap/include \
@@ -67,33 +70,25 @@ CXXFLAGS+=-I$(NIMBLE_ROOT)/nimble/include \
     -I$(NIMBLE_ROOT)/ext/tinycrypt/include
 endif
 
-
-# Find Nimble library (dynamic linking)
-# Look for libnimble.so or libnimble.a in NIMBLE_ROOT/lib or NIMBLE_ROOT/build
-ifeq ($(NIMBLE_LIBDIR),)
-NIMBLE_LIB_PATH=$(firstword $(wildcard $(NIMBLE_ROOT)/lib/libnimble.so $(NIMBLE_ROOT)/build/libnimble.so $(NIMBLE_ROOT)/lib/libnimble.a $(NIMBLE_ROOT)/build/libnimble.a))
-ifeq ($(NIMBLE_LIB_PATH),)
-$(error Nimble library not found. Please build Nimble as a shared library first. \
-Expected location: $(NIMBLE_ROOT)/lib/libnimble.so or $(NIMBLE_ROOT)/build/libnimble.so)
-endif
-NIMBLE_LIBDIR=$(dir $(NIMBLE_LIB_PATH))
-endif
+# Link Nimble library (NIMBLE_LIBDIR set by configure)
+ifneq ($(strip $(NIMBLE_LIBDIR)),)
 LDFLAGS+=-L$(NIMBLE_LIBDIR) -Wl,-rpath,$(NIMBLE_LIBDIR)
 LOADLIBES+=-lnimble
 endif
+endif
 
 # Server support objects
-ifdef BLEPP_SERVER_SUPPORT
+ifneq ($(strip $(BLEPP_SERVER_SUPPORT)),)
 LIBOBJS+=src/bleattributedb.o src/blegattserver.o
 CXXFLAGS+=-DBLEPP_SERVER_SUPPORT
 
 # BlueZ server transport (only if BlueZ support enabled)
-ifdef BLEPP_BLUEZ_SUPPORT
+ifneq ($(strip $(BLEPP_BLUEZ_SUPPORT)),)
 LIBOBJS+=src/bluez_transport.o
 endif
 
 # Nimble server transport (only if Nimble support enabled)
-ifdef BLEPP_NIMBLE_SUPPORT
+ifneq ($(strip $(BLEPP_NIMBLE_SUPPORT)),)
 LIBOBJS+=src/nimble_transport.o
 endif
 
@@ -103,7 +98,7 @@ endif
 PROGS=examples/lescan_transport
 
 # BlueZ-specific examples (use BLEGATTStateMachine::connect_blocking)
-ifdef BLEPP_BLUEZ_SUPPORT
+ifneq ($(strip $(BLEPP_BLUEZ_SUPPORT)),)
 PROGS+=examples/lescan_simple examples/blelogger examples/bluetooth examples/temperature examples/read_device_name examples/write
 endif
 
@@ -179,7 +174,7 @@ BLUEZ_TESTS=
 
 # Combine tests based on what's enabled
 TESTS=$(CORE_TESTS)
-ifdef BLEPP_BLUEZ_SUPPORT
+ifneq ($(strip $(BLEPP_BLUEZ_SUPPORT)),)
 TESTS+=$(BLUEZ_TESTS)
 endif
 
